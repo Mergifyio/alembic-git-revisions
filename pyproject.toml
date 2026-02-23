@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alembic-git-revisions"
+version = "0.1.0"
+description = "Automatic Alembic migration chaining based on git commit history"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+]
+
+[project.scripts]
+alembic-git-revisions = "alembic_git_revisions:_cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["alembic_git_revisions"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # pydocstyle
+    "ANN",     # flake8-annotations
+    "COM812",  # trailing comma (conflicts with formatter)
+    "ISC001",  # implicit string concat (conflicts with formatter)
+    "S603",    # subprocess call with shell=False (we call git intentionally)
+    "S607",    # partial executable path (git is expected in PATH)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",    # assert is fine in tests
+    "SLF001",  # private member access is fine in tests
+    "INP001",  # no __init__.py needed in tests
+    "TC003",   # no need for TYPE_CHECKING in tests
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+strict = true
