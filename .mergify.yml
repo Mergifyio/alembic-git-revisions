@@ -1,0 +1,51 @@
+extends: .github
+shared:
+  check_runs: &CheckRuns
+    - check-success=all-greens
+
+queue_rules:
+  - name: default
+    autoqueue: true
+    queue_conditions:
+      - base=main
+    commit_message_template: |
+      {{ title }} (#{{ number }})
+
+      {{ body }}
+    merge_method: squash
+
+pull_request_rules:
+  - name: request review
+    conditions:
+      - -author=dependabot[bot]
+      - -author=mergify-ci-bot
+      - -merged
+      - -closed
+      - and: *CheckRuns
+      - "#approved-reviews-by=0"
+      - "#changes-requested-reviews-by=0"
+      - "review-requested!=@devs"
+    actions:
+      request_reviews:
+        teams:
+          - devs
+
+merge_protections:
+  - name: 🤖 Continuous Integration
+    if: []
+    success_conditions:
+      - and: *CheckRuns
+
+  - name: 👀 Review Requirements
+    if: []
+    success_conditions:
+      - or:
+        - "#approved-reviews-by>=1"
+        - author = dependabot[bot]
+        - author = mergify-ci-bot
+
+merge_queue:
+  max_parallel_checks: 5
+
+merge_protections_settings:
+  reporting_method: deployments
