@@ -1,10 +1,10 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
 name = "alembic-git-revisions"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Automatic Alembic migration chaining based on git commit history"
 requires-python = ">=3.11"
 license = "Apache-2.0"
@@ -26,6 +26,10 @@ dev = [
 
 [project.scripts]
 alembic-git-revisions = "alembic_git_revisions:_cli"
+
+[tool.hatch.version]
+source = "vcs"
+fallback-version = "0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["alembic_git_revisions"]
