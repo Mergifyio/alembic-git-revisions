@@ -14,12 +14,28 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Database",
 ]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "mypy",
+    "poethepoet",
+    "pytest",
+    "ruff",
+]
 
 [project.scripts]
 alembic-git-revisions = "alembic_git_revisions:_cli"
 
 [tool.hatch.build.targets.wheel]
 packages = ["alembic_git_revisions"]
+
+[tool.poe.tasks]
+linters = ["lint", "format-check", "typecheck"]
+lint = "ruff check alembic_git_revisions/ tests/"
+format-check = "ruff format --check alembic_git_revisions/ tests/"
+typecheck = "mypy alembic_git_revisions/"
+test = "pytest tests/ -v"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
