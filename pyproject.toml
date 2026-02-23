@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "alembic-git-revisions"
 dynamic = ["version"]
 description = "Automatic Alembic migration chaining based on git commit history"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 classifiers = [
