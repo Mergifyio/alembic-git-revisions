@@ -134,7 +134,7 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
                 "--format=",
                 "--name-only",
                 "--",
-                str(versions_dir) + "/",
+                versions_dir.name + "/",
             ],
             capture_output=True,
             text=True,
