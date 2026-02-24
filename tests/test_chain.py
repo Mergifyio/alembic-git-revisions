@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 from unittest import mock
 
 import pytest
@@ -344,6 +345,66 @@ def test_no_git_no_chain_file(tmp_path: pathlib.Path) -> None:
             _chain.build_chain(versions_dir)
     finally:
         _chain.build_chain.cache_clear()
+
+
+def test_git_commit_order_with_relative_nested_path(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_get_git_commit_order must work with multi-component relative paths.
+
+    Regression test: when versions_dir is a relative path like
+    ``a/b/versions``, git runs with cwd=``a/b`` and the pathspec must
+    be just ``versions/``, not ``a/b/versions/`` (which would double
+    the path and match nothing).
+    """
+    # Create a git repo with a nested versions directory
+    repo = tmp_path / "repo"
+    nested = repo / "a" / "b" / "versions"
+    nested.mkdir(parents=True)
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Add files in separate commits to establish git order
+    (nested / "aaaa_first.py").write_text("down_revision = None\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "first"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    (nested / "bbbb_second.py").write_text('down_revision = "aaaa"\n')
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "second"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Test with a multi-component relative path (the bug scenario)
+    monkeypatch.chdir(repo)
+    relative_versions = pathlib.Path("a") / "b" / "versions"
+    result = _chain._get_git_commit_order(relative_versions)
+
+    assert result is not None
+    assert "aaaa_first.py" in result
+    assert "bbbb_second.py" in result
+    assert result.index("aaaa_first.py") < result.index("bbbb_second.py")
 
 
 def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
