@@ -215,12 +215,14 @@ def _build_dynamic_chain(
     """Build ``{revision: down_revision}`` for dynamic migrations.
 
     Dynamic files are sorted by ``(git_sequence, filename)`` and chained
-    linearly after *static_head*.
+    linearly after *static_head*.  Hybrid files (static files whose
+    ``down_revision`` points to a dynamic revision) are placed
+    immediately after their target so that dynamic migrations added by
+    concurrent branches chain after the hybrid, not to the same target
+    (which would create a fork / multiple heads).
 
-    Hybrid files (static files whose ``down_revision`` points to a
-    dynamic revision) participate in the ordering so that subsequent
-    dynamic files chain after them, but they don't get entries in the
-    returned dict since they already have a hardcoded ``down_revision``.
+    Hybrids don't get entries in the returned dict since they already
+    have a hardcoded ``down_revision``.
     """
     dynamic_revisions = {f.revision for f in files if f.is_dynamic}
 
@@ -228,7 +230,25 @@ def _build_dynamic_chain(
         f for f in files if f.is_dynamic or f.static_down_revision in dynamic_revisions
     ]
 
-    dynamic_participants.sort(key=lambda f: (f.git_sequence, f.filename))
+    # O(1) lookup for each participant's git_sequence by revision.
+    seq_by_rev = {f.revision: f.git_sequence for f in dynamic_participants}
+
+    # Map each hybrid's target revision to that target's git_sequence so
+    # the hybrid sorts right after its target (not at its own commit time).
+    target_seq = {
+        f.static_down_revision: seq_by_rev.get(f.static_down_revision, f.git_sequence)
+        for f in dynamic_participants
+        if not f.is_dynamic and f.static_down_revision
+    }
+
+    def _sort_key(f: MigrationFile) -> tuple[int, int, str]:
+        if not f.is_dynamic and f.static_down_revision in target_seq:
+            # Place hybrid right after its target (the 1 ensures it
+            # sorts after the target itself at the same git_sequence).
+            return (target_seq[f.static_down_revision], 1, f.filename)
+        return (f.git_sequence, 0, f.filename)
+
+    dynamic_participants.sort(key=_sort_key)
 
     chain: dict[str, str] = {}
     prev_revision = static_head
