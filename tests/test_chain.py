@@ -464,6 +464,125 @@ def test_dynamic_inserted_before_hybrid_no_multiple_heads(
     # Correct chain: aaaa -> bbbb -> dddd(hybrid) -> cccc
     assert chain == {"bbbb": "aaaa", "cccc": "dddd"}
 
+    # Reconstruct the full chain (static from files + dynamic from chain)
+    # and walk it from root to head to verify the exact linear order.
+    files = _chain._parse_migration_files(versions_dir, git_order)
+    full = {f.revision: f.static_down_revision for f in files if not f.is_dynamic}
+    full.update(chain)
+    # Walk from root (down_revision=None) to head.
+    children = {v: k for k, v in full.items()}
+    rev = children[None]  # root
+    walked = [rev]
+    while rev in children:
+        rev = children[rev]
+        walked.append(rev)
+    assert walked == ["aaaa", "bbbb", "dddd", "cccc"]
+
+
+def test_mergify_engine_architecture(tmp_path: pathlib.Path) -> None:
+    """Reproduce the mergify-engine migration layout and verify the chain file.
+
+    mergify-engine has three tiers of migrations:
+
+    * A long static chain (394 migrations with hardcoded down_revision).
+    * A dynamic chain (22 migrations using get_down_revision()).
+    * One hybrid migration (static down_revision pointing to a dynamic rev).
+
+    This test recreates that architecture at a smaller scale and verifies
+    that generate_chain_file produces a JSON file that, combined with the
+    static down_revisions, yields one linear chain from root to head.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    # -- Static chain: s1 → s2 → s3 (like the 394 static migrations) --
+    (versions_dir / "aa01_static_root.py").write_text(
+        'revision = "aa01"\ndown_revision = None\n',
+    )
+    (versions_dir / "aa02_static_mid.py").write_text(
+        'revision = "aa02"\ndown_revision = "aa01"\n',
+    )
+    (versions_dir / "aa03_static_head.py").write_text(
+        'revision = "aa03"\ndown_revision = "aa02"\n',
+    )
+
+    # -- Dynamic chain: d1 → d2 → d3 → d4 → d5 (like the 22 dynamic) --
+    for i in range(1, 6):
+        (versions_dir / f"bb0{i}_dynamic_{i}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "bb0{i}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+
+    # -- Hybrid: static migration pointing to dynamic d4 (like 34c2e9a4b043) --
+    # In production this was added on a separate branch and merged after d5.
+    (versions_dir / "cc01_hybrid.py").write_text(
+        'revision = "cc01"\ndown_revision = "bb04"\n',
+    )
+
+    # Git order: statics first, then dynamics, then hybrid last (as in prod).
+    # d5 was merged before the hybrid, so it appears earlier in git order.
+    git_order = [
+        "aa01_static_root.py",
+        "aa02_static_mid.py",
+        "aa03_static_head.py",
+        "bb01_dynamic_1.py",
+        "bb02_dynamic_2.py",
+        "bb03_dynamic_3.py",
+        "bb04_dynamic_4.py",
+        "bb05_dynamic_5.py",  # branch A merged first
+        "cc01_hybrid.py",  # branch B merged second
+    ]
+
+    # Generate the chain file (the JSON produced for Docker/CI builds).
+    _chain.build_chain.cache_clear()
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        _chain.generate_chain_file(versions_dir)
+
+    # Read the generated JSON.
+    chain_file = tmp_path / "revision_chain.json"
+    assert chain_file.exists()
+    chain = json.loads(chain_file.read_text())
+
+    # The chain file must contain exactly the dynamic migrations.
+    # The hybrid (cc01) is NOT in the file — it has a hardcoded down_revision.
+    assert chain == {
+        "bb01": "aa03",  # first dynamic chains after static head
+        "bb02": "bb01",
+        "bb03": "bb02",
+        "bb04": "bb03",
+        # bb05 must chain after the hybrid, not after bb04 (the bug)
+        "bb05": "cc01",
+    }
+
+    # Reconstruct the full chain (static + dynamic + hybrid) and walk it.
+    files = _chain._parse_migration_files(versions_dir, git_order)
+    full = {f.revision: f.static_down_revision for f in files if not f.is_dynamic}
+    full.update(chain)
+
+    children = {v: k for k, v in full.items()}
+    rev = children[None]
+    walked = [rev]
+    while rev in children:
+        rev = children[rev]
+        walked.append(rev)
+
+    assert walked == [
+        "aa01",  # static root
+        "aa02",
+        "aa03",  # static head
+        "bb01",  # dynamic chain starts
+        "bb02",
+        "bb03",
+        "bb04",  # hybrid's target
+        "cc01",  # hybrid (hardcoded down_revision="bb04")
+        "bb05",  # last dynamic, chains after hybrid
+    ]
+
 
 def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
     """get_down_revision auto-discovers versions_dir from caller's location."""
