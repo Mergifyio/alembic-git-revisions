@@ -10,6 +10,32 @@ import pytest
 from alembic_git_revisions import _chain
 
 
+def _walk_chain(full: dict[str, str | None]) -> list[str]:
+    """Walk a ``{revision: down_revision}`` map from root to head.
+
+    Fails loudly on forks (two revisions sharing a down_revision) and
+    on cycles (more steps than revisions).
+    """
+    children: dict[str | None, str] = {}
+    for child_rev, parent_rev in full.items():
+        if parent_rev in children:
+            pytest.fail(
+                f"Fork: {children[parent_rev]!r} and {child_rev!r} "
+                f"both point to {parent_rev!r}",
+            )
+        children[parent_rev] = child_rev
+    rev = children[None]
+    walked = [rev]
+    for _ in range(len(full)):
+        if rev not in children:
+            break
+        rev = children[rev]
+        walked.append(rev)
+    else:
+        pytest.fail("Cycle detected in revision chain")
+    return walked
+
+
 def test_chain_actual_head(tmp_path: pathlib.Path) -> None:
     """get_down_revision must return the actual chain head, not git-order head."""
     versions_dir = tmp_path / "versions"
@@ -463,6 +489,13 @@ def test_dynamic_inserted_before_hybrid_no_multiple_heads(
     # cccc must chain AFTER dddd (not to bbbb) to avoid multiple heads.
     # Correct chain: aaaa -> bbbb -> dddd(hybrid) -> cccc
     assert chain == {"bbbb": "aaaa", "cccc": "dddd"}
+
+    # Reconstruct the full chain (static from files + dynamic from chain)
+    # and walk it from root to head to verify the exact linear order.
+    files = _chain._parse_migration_files(versions_dir, git_order)
+    full = {f.revision: f.static_down_revision for f in files if not f.is_dynamic}
+    full.update(chain)
+    assert _walk_chain(full) == ["aaaa", "bbbb", "dddd", "cccc"]
 
 
 def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
