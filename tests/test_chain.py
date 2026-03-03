@@ -407,6 +407,64 @@ def test_git_commit_order_with_relative_nested_path(
     assert result.index("aaaa_first.py") < result.index("bbbb_second.py")
 
 
+def test_dynamic_inserted_before_hybrid_no_multiple_heads(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A dynamic migration added before a hybrid must not create multiple heads.
+
+    Reproduces a production failure: two branches fork from the same dynamic
+    head.  Branch A adds a dynamic migration; branch B adds a static
+    migration (hybrid) pointing to the same head.  Branch A merges first,
+    so the new dynamic migration appears *before* the hybrid in git order.
+
+    Without a fix, both the new dynamic migration and the hybrid point to
+    the same predecessor, creating a fork and ``MultipleHeads``.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    # Static root
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    # Dynamic migration (the previous head before the two branches)
+    (versions_dir / "bbbb_dynamic.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "bbbb"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    # Dynamic migration added on branch A (merged first)
+    (versions_dir / "cccc_dynamic.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "cccc"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    # Hybrid: static migration added on branch B, hardcoded to the old head.
+    # Merged *after* branch A, so it appears last in git order.
+    (versions_dir / "dddd_hybrid.py").write_text(
+        'revision = "dddd"\ndown_revision = "bbbb"\n',
+    )
+
+    git_order = [
+        "aaaa_root.py",
+        "bbbb_dynamic.py",
+        "cccc_dynamic.py",  # branch A merged first
+        "dddd_hybrid.py",  # branch B merged second
+    ]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        chain = _chain._build_chain_from_git(versions_dir)
+
+    # dddd hardcodes down_revision="bbbb", so it doesn't need a chain entry.
+    # cccc must chain AFTER dddd (not to bbbb) to avoid multiple heads.
+    # Correct chain: aaaa -> bbbb -> dddd(hybrid) -> cccc
+    assert chain == {"bbbb": "aaaa", "cccc": "dddd"}
+
+
 def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
     """get_down_revision auto-discovers versions_dir from caller's location."""
     versions_dir = tmp_path / "versions"
