@@ -701,3 +701,104 @@ def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
         _chain.build_chain.cache_clear()
 
     assert result == "bbbb"
+
+
+class TestVerifyAppendOnly:
+    def test_append_only_pass(self) -> None:
+        """New entries are accepted."""
+        base = {"aaaa": "bbbb", "cccc": "dddd"}
+        new = {"aaaa": "bbbb", "cccc": "dddd", "eeee": "ffff"}
+        _chain.verify_append_only(base, new)
+
+    def test_identical_chains_pass(self) -> None:
+        """Identical chains are accepted (0 new entries)."""
+        chain = {"aaaa": "bbbb"}
+        _chain.verify_append_only(chain, dict(chain))
+
+    def test_empty_base_always_passes(self) -> None:
+        """An empty base chain accepts anything."""
+        _chain.verify_append_only({}, {"aaaa": "bbbb"})
+
+    def test_removed_entry_fails(self) -> None:
+        """Removing an entry raises ChainNotAppendOnlyError."""
+        base = {"aaaa": "bbbb", "cccc": "dddd"}
+        new = {"aaaa": "bbbb"}
+        with pytest.raises(_chain.ChainNotAppendOnlyError, match=r"Removed.*cccc"):
+            _chain.verify_append_only(base, new)
+
+    def test_modified_entry_fails(self) -> None:
+        """Changing a down_revision raises ChainNotAppendOnlyError."""
+        base = {"aaaa": "bbbb"}
+        new = {"aaaa": "zzzz"}
+        with pytest.raises(_chain.ChainNotAppendOnlyError, match=r"Modified.*aaaa"):
+            _chain.verify_append_only(base, new)
+
+    def test_multiple_errors_reported(self) -> None:
+        """All violations are reported at once."""
+        base = {"aaaa": "bbbb", "cccc": "dddd", "eeee": "ffff"}
+        new = {"aaaa": "zzzz"}  # modified aaaa, removed cccc and eeee
+        with pytest.raises(_chain.ChainNotAppendOnlyError) as exc_info:
+            _chain.verify_append_only(base, new)
+        assert len(exc_info.value.errors) == 3  # noqa: PLR2004
+
+    def test_generate_then_verify_pass(self, tmp_path: pathlib.Path) -> None:
+        """Generate a chain and verify it extends a previous chain."""
+        versions_dir = tmp_path / "versions"
+        versions_dir.mkdir()
+
+        (versions_dir / "aaaa_root.py").write_text(
+            'revision = "aaaa"\ndown_revision = None\n',
+        )
+        (versions_dir / "bbbb_dynamic.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            'revision = "bbbb"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+
+        git_order = ["aaaa_root.py", "bbbb_dynamic.py"]
+        previous_chain = {"bbbb": "aaaa"}
+
+        with mock.patch.object(
+            _chain,
+            "_get_git_commit_order",
+            return_value=git_order,
+        ):
+            _chain.generate_chain_file(versions_dir)
+
+        new_chain = json.loads(
+            (tmp_path / "revision_chain.json").read_text(),
+        )
+        _chain.verify_append_only(previous_chain, new_chain)
+
+    def test_generate_then_verify_fail(self, tmp_path: pathlib.Path) -> None:
+        """Verify fails when previous chain has entries missing from new."""
+        versions_dir = tmp_path / "versions"
+        versions_dir.mkdir()
+
+        (versions_dir / "aaaa_root.py").write_text(
+            'revision = "aaaa"\ndown_revision = None\n',
+        )
+        (versions_dir / "bbbb_dynamic.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            'revision = "bbbb"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+
+        git_order = ["aaaa_root.py", "bbbb_dynamic.py"]
+        previous_chain = {"bbbb": "aaaa", "zzzz": "yyyy"}
+
+        with mock.patch.object(
+            _chain,
+            "_get_git_commit_order",
+            return_value=git_order,
+        ):
+            _chain.generate_chain_file(versions_dir)
+
+        new_chain = json.loads(
+            (tmp_path / "revision_chain.json").read_text(),
+        )
+        with pytest.raises(
+            _chain.ChainNotAppendOnlyError,
+            match=r"Removed.*zzzz",
+        ):
+            _chain.verify_append_only(previous_chain, new_chain)
