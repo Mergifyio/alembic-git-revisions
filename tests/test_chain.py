@@ -596,6 +596,90 @@ def test_mergify_engine_architecture(tmp_path: pathlib.Path) -> None:
     ]
 
 
+def test_renamed_migration_file_detected(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A renamed migration file must appear in git order at the rename commit.
+
+    Regression test: when a migration file is renamed (e.g. changing its
+    revision ID), git's rename detection causes ``--diff-filter=A`` to
+    exclude it — the file is seen as a rename, not an add.  Without
+    ``--no-renames``, the file gets the fallback ``uncommitted_seq``
+    ordering, placing it at the tail of the chain regardless of when the
+    rename actually happened.  This can cause a later migration to be
+    inserted *before* the renamed one, and if the renamed one was already
+    applied in production, the inserted migration becomes a ghost
+    predecessor that alembic silently skips.
+    """
+    repo = tmp_path / "repo"
+    versions = repo / "versions"
+    versions.mkdir(parents=True)
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Commit 1: add original migration file
+    (versions / "aaaa_original.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add aaaa"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Commit 2: rename the file (simulates changing the revision ID)
+    (versions / "aaaa_original.py").rename(versions / "bbbb_renamed.py")
+    (versions / "bbbb_renamed.py").write_text(
+        'revision = "bbbb"\ndown_revision = None\n',
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "rename aaaa to bbbb"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Commit 3: add a new migration after the rename
+    (versions / "cccc_new.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "cccc"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add cccc"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.chdir(repo)
+    result = _chain._get_git_commit_order(pathlib.Path("versions"))
+
+    assert result is not None
+    # The renamed file must appear in the result
+    assert "bbbb_renamed.py" in result
+    assert "cccc_new.py" in result
+    # The renamed file must appear BEFORE the new one
+    assert result.index("bbbb_renamed.py") < result.index("cccc_new.py")
+
+
 def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
     """get_down_revision auto-discovers versions_dir from caller's location."""
     versions_dir = tmp_path / "versions"

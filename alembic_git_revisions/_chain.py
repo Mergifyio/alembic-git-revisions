@@ -113,9 +113,16 @@ def _is_shallow_clone(versions_dir: pathlib.Path) -> bool:
 def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
     """Get the commit order for migration files in *versions_dir*.
 
-    Uses ``git log --reverse --diff-filter=A`` to list files in the order
-    they were first added, walking the linear commit tree from oldest to
-    newest.
+    Uses ``git log --reverse --diff-filter=A --no-renames`` to list files
+    in the order they were first added, walking the linear commit tree
+    from oldest to newest.
+
+    ``--no-renames`` is critical: without it, git's rename detection can
+    cause a renamed migration file (e.g. when changing its revision ID)
+    to be treated as a rename rather than an add.  ``--diff-filter=A``
+    then silently excludes the file, which causes it to receive the
+    fallback ``uncommitted_seq`` ordering — placing it at the tail of
+    the chain regardless of its actual position in git history.
 
     Returns an ordered list of filenames (deduplicated, oldest first),
     or ``None`` if git is not available or the repository is a shallow clone
@@ -131,6 +138,7 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
                 "log",
                 "--reverse",
                 "--diff-filter=A",
+                "--no-renames",
                 "--format=",
                 "--name-only",
                 "--",
