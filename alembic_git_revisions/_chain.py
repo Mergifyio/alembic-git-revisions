@@ -342,35 +342,6 @@ def get_down_revision(
         raise ValueError(msg) from None
 
 
-class ChainNotAppendOnlyError(Exception):
-    """The new chain has removed or modified entries from the previous chain."""
-
-    def __init__(self, errors: list[str]) -> None:
-        self.errors = errors
-        super().__init__("\n".join(errors))
-
-
-def verify_append_only(
-    previous_chain: dict[str, str],
-    new_chain: dict[str, str],
-) -> None:
-    """Verify that *new_chain* only adds entries compared to *previous_chain*.
-
-    Raises :class:`ChainNotAppendOnlyError` if any entries were removed or
-    had their ``down_revision`` changed.
-    """
-    errors: list[str] = []
-    for revision, down_revision in sorted(previous_chain.items()):
-        if revision not in new_chain:
-            errors.append(f"Removed: {revision} -> {down_revision}")
-        elif new_chain[revision] != down_revision:
-            errors.append(
-                f"Modified {revision}: {down_revision} -> {new_chain[revision]}"
-            )
-    if errors:
-        raise ChainNotAppendOnlyError(errors)
-
-
 def generate_chain_file(versions_dir: pathlib.Path) -> None:
     """Generate the revision_chain.json file from git history.
 
