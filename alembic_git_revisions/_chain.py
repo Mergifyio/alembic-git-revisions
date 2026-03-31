@@ -117,6 +117,16 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
     in the order they were first added, walking the linear commit tree
     from oldest to newest.
 
+    The command runs without a pathspec so that it scans the full repo
+    history.  This is necessary to preserve chronological ordering when
+    migrations are moved to a new directory: the original add commits
+    (in the old directory) come before the move commit, so each file's
+    first appearance in the log reflects its true creation order.  Results
+    are filtered against the set of ``.py`` files that currently exist in
+    *versions_dir*, so unrelated files are excluded.  Deduplication
+    (keep-first) ensures that a file moved across directories keeps the
+    ordering of its original add, not the later move.
+
     ``--no-renames`` is critical: without it, git's rename detection can
     cause a renamed migration file (e.g. when changing its revision ID)
     to be treated as a rename rather than an add.  ``--diff-filter=A``
@@ -131,6 +141,8 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
     if _is_shallow_clone(versions_dir):
         return None
 
+    existing = {f.name for f in versions_dir.glob("*.py")}
+
     try:
         result = subprocess.run(
             [
@@ -141,8 +153,6 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
                 "--no-renames",
                 "--format=",
                 "--name-only",
-                "--",
-                versions_dir.name + "/",
             ],
             capture_output=True,
             text=True,
@@ -159,7 +169,7 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
         if not line or not line.endswith(".py"):
             continue
         fname = pathlib.Path(line).name
-        if fname not in order:
+        if fname in existing and fname not in order:
             order.append(fname)
 
     return order
