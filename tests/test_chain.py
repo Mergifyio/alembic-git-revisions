@@ -680,6 +680,113 @@ def test_renamed_migration_file_detected(
     assert result.index("bbbb_renamed.py") < result.index("cccc_new.py")
 
 
+def test_migrations_moved_to_new_directory(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Moving all migrations to a new directory must preserve git add order.
+
+    Reproduces a real scenario: migrations A, B, C are added in separate
+    commits to ``versions/``, then all moved to ``new_versions/`` in a
+    single commit.
+
+    With ``--diff-filter=A --no-renames``, git sees the move as deletes
+    from the old directory + adds to the new directory.  All files appear
+    as added in the same (move) commit, so the original chronological
+    order is lost — git lists them alphabetically within a single commit.
+
+    Filenames are chosen so that alphabetical order (cccc, dddd, eeee)
+    differs from chronological add order (eeee, dddd, cccc), making the
+    bug visible.
+    """
+    repo = tmp_path / "repo"
+    old_versions = repo / "versions"
+    old_versions.mkdir(parents=True)
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Add migrations in REVERSE alphabetical order so that
+    # chronological order ≠ alphabetical order.
+    # Commit 1: add migration eeee (alphabetically last)
+    (old_versions / "eeee_first.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "eeee"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add eeee"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Commit 2: add migration dddd
+    (old_versions / "dddd_second.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "dddd"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add dddd"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Commit 3: add migration cccc (alphabetically first)
+    (old_versions / "cccc_third.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "cccc"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "add cccc"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    # Commit 4: move all migrations to a new directory
+    new_versions = repo / "new_versions"
+    new_versions.mkdir()
+    for f in old_versions.iterdir():
+        f.rename(new_versions / f.name)
+    old_versions.rmdir()
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", "move migrations to new_versions"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+
+    monkeypatch.chdir(repo)
+    result = _chain._get_git_commit_order(pathlib.Path("new_versions"))
+
+    assert result is not None
+    assert "eeee_first.py" in result
+    assert "dddd_second.py" in result
+    assert "cccc_third.py" in result
+    # The critical assertion: order must be chronological (eeee, dddd, cccc),
+    # not alphabetical (cccc, dddd, eeee).
+    assert result == ["eeee_first.py", "dddd_second.py", "cccc_third.py"]
+
+
 def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
     """get_down_revision auto-discovers versions_dir from caller's location."""
     versions_dir = tmp_path / "versions"
