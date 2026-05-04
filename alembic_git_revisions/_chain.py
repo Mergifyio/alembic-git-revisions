@@ -127,6 +127,14 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
     (keep-first) ensures that a file moved across directories keeps the
     ordering of its original add, not the later move.
 
+    ``--first-parent`` follows only the first parent at every merge
+    commit, so the walk stays on the integration branch (e.g. ``main``)
+    and never enters feature-branch ancestors.  Without it, a migration
+    whose original feature-branch commit is reachable from HEAD would
+    receive that early commit's date as its sequence — even when another
+    migration was merged onto main earlier — breaking the append-only
+    chain order. (INC-1342.)
+
     ``--no-renames`` is critical: without it, git's rename detection can
     cause a renamed migration file (e.g. when changing its revision ID)
     to be treated as a rename rather than an add.  ``--diff-filter=A``
@@ -151,6 +159,7 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
                 "--reverse",
                 "--diff-filter=A",
                 "--no-renames",
+                "--first-parent",
                 "--format=",
                 "--name-only",
             ],

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import subprocess
 from unittest import mock
@@ -785,6 +786,94 @@ def test_migrations_moved_to_new_directory(
     # The critical assertion: order must be chronological (eeee, dddd, cccc),
     # not alphabetical (cccc, dddd, eeee).
     assert result == ["eeee_first.py", "dddd_second.py", "cccc_third.py"]
+
+
+def test_feature_branch_merge_preserves_first_parent_order(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Feature-branch add commits must not override on-main merge order.
+
+    Reproduces INC-1342: alembic-git-revisions v6 walks all reachable
+    commits with no pathspec, so a migration whose original feature-branch
+    commit is reachable from HEAD (via a real merge commit) gets its
+    git_sequence from that early commit — even when another migration
+    was merged onto main earlier (and so should come first in the chain).
+
+    Setup:
+      * ``yyyy`` is added directly on main at 2026-05-04 11:50.
+      * ``xxxx`` is added on a feature branch at 2026-04-30 23:23 (before
+        ``yyyy``) and merged into main with ``--no-ff`` at 2026-05-04 14:56.
+
+    On main's first-parent history the order is base → yyyy → xxxx
+    (xxxx arrives via the merge commit, after yyyy was committed).
+    Any deploy whose previous chain head was ``yyyy`` must see ``xxxx``
+    appended *after* ``yyyy``, not inserted before it.
+    """
+    repo = tmp_path / "repo"
+    versions = repo / "versions"
+    versions.mkdir(parents=True)
+
+    def run(*args: str, when: str | None = None) -> None:
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@test.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@test.com",
+        }
+        if when is not None:
+            env["GIT_AUTHOR_DATE"] = when
+            env["GIT_COMMITTER_DATE"] = when
+        subprocess.run(args, cwd=repo, check=True, capture_output=True, env=env)
+
+    run("git", "init", "-q", "-b", "main")
+
+    (versions / "aaaa_base.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "aaaa"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    run("git", "add", ".")
+    run("git", "commit", "-m", "base", when="2026-04-28T00:00:00")
+
+    # Feature branch: add xxxx at the EARLIEST timestamp.
+    run("git", "checkout", "-q", "-b", "feature")
+    (versions / "xxxx_feature.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "xxxx"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    run("git", "add", ".")
+    run("git", "commit", "-m", "add xxxx on feature", when="2026-04-30T23:23:00")
+
+    # Back on main: add yyyy AFTER xxxx in wall-clock time, but BEFORE the
+    # feature merge in main's first-parent history.
+    run("git", "checkout", "-q", "main")
+    (versions / "yyyy_main.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "yyyy"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    run("git", "add", ".")
+    run("git", "commit", "-m", "add yyyy on main", when="2026-05-04T11:50:00")
+
+    # Merge feature into main with a real merge commit so xxxx's original
+    # add commit (at 04-30) stays reachable from HEAD.
+    run(
+        "git",
+        "merge",
+        "--no-ff",
+        "-m",
+        "merge feature",
+        "feature",
+        when="2026-05-04T14:56:00",
+    )
+
+    monkeypatch.chdir(repo)
+    result = _chain._get_git_commit_order(pathlib.Path("versions"))
+
+    assert result == ["aaaa_base.py", "yyyy_main.py", "xxxx_feature.py"]
 
 
 def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
