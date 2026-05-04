@@ -5,7 +5,6 @@ shared:
 
 queue_rules:
   - name: default
-    autoqueue: true
     queue_conditions:
       - base=main
     commit_message_template: |
@@ -40,12 +39,13 @@ merge_protections:
     if: []
     success_conditions:
       - or:
-        - "#approved-reviews-by>=1"
-        - author = dependabot[bot]
-        - author = mergify-ci-bot
+          - "#approved-reviews-by>=1"
+          - author = dependabot[bot]
+          - author = mergify-ci-bot
 
 merge_queue:
   max_parallel_checks: 5
 
 merge_protections_settings:
   reporting_method: deployments
+  auto_merge_conditions: true
