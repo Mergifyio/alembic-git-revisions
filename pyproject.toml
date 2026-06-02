@@ -9,13 +9,25 @@ description = "Automatic Alembic migration chaining based on git commit history"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+keywords = ["alembic", "sqlalchemy", "migrations", "database", "git", "multiple-heads", "down_revision"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
+    "Topic :: Software Development :: Version Control :: Git",
 ]
 dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Mergifyio/alembic-git-revisions"
+Source = "https://github.com/Mergifyio/alembic-git-revisions"
+Issues = "https://github.com/Mergifyio/alembic-git-revisions/issues"
+"Why we built this" = "https://julien.danjou.info/blog/fixing-alembics-multiple-heads-problem-with-git/"
 
 [project.optional-dependencies]
 dev = [

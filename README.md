@@ -1,10 +1,16 @@
 # alembic-git-revisions
 
-Automatic [Alembic](https://alembic.sqlalchemy.org/) migration chaining based on git commit history.
+Automatic [Alembic](https://alembic.sqlalchemy.org/) migration chaining based on git commit history. No more `Multiple head revisions are present for given argument 'head'`.
 
 ## The problem
 
-When multiple developers create Alembic migrations on separate branches, they often end up with the same `down_revision` — the current head at the time each branch was created. When these branches merge, Alembic fails with a `MultipleHeads` error because two migrations point to the same predecessor.
+You merged two branches and Alembic now refuses to run:
+
+```
+ERROR [alembic.util.messaging] Multiple head revisions are present for given argument 'head'; please specify a specific target revision, '<branchname>@head' to narrow to a specific head, or 'heads' for all heads
+```
+
+When multiple developers create Alembic migrations on separate branches, they often end up with the same `down_revision` — the current head at the time each branch was created. When these branches merge, Alembic fails with this `MultipleHeads` error because two migrations point to the same predecessor.
 
 The usual fix is manual: rebase, update `down_revision`, and hope nobody else merges in the meantime.
 
