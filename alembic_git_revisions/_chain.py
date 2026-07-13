@@ -55,7 +55,11 @@ class MigrationFile:
         """
         content = path.read_text(encoding="utf-8")
         fname = path.name
-        assignments = _module_level_assignments(content)
+        try:
+            assignments = _module_level_assignments(content)
+        except SyntaxError as exc:
+            msg = f"Cannot parse migration file {path}: {exc}"
+            raise ValueError(msg) from exc
 
         revision = _string_value(assignments.get("revision"))
         if revision is None:

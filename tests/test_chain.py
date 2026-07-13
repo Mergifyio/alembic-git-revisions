@@ -1010,3 +1010,14 @@ def test_from_file_falls_back_to_filename_without_revision_attr(
     assert parsed.revision == "abcd"
     assert not parsed.is_dynamic
     assert parsed.static_down_revision == "beef"
+
+
+def test_from_file_syntax_error_names_the_file(tmp_path: pathlib.Path) -> None:
+    """A migration that is not valid Python raises ValueError naming the file."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    path = versions_dir / "20260107_0001_broken.py"
+    path.write_text('revision = "20260107_0001"\ndown_revision = (\n')
+
+    with pytest.raises(ValueError, match="20260107_0001_broken"):
+        _chain.MigrationFile.from_file(path, git_sequence=0)
