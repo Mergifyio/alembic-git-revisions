@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import dataclasses
 import functools
 import inspect
@@ -8,11 +9,6 @@ import pathlib
 import re
 import subprocess
 
-_DOWN_REVISION_RE = re.compile(r'^down_revision\s*=\s*"([^"]+)"', re.MULTILINE)
-_DYNAMIC_DOWN_REVISION_RE = re.compile(
-    r"^down_revision\s*=\s*get_down_revision\(",
-    re.MULTILINE,
-)
 _REVISION_FROM_FILENAME_RE = re.compile(r"^([a-f0-9]+)_")
 
 _CHAIN_FILENAME = "revision_chain.json"
@@ -46,12 +42,29 @@ class MigrationFile:
         path: pathlib.Path,
         git_sequence: int,
     ) -> MigrationFile:
-        """Parse a migration file and classify it."""
+        """Parse a migration file and classify it.
+
+        ``revision`` and ``down_revision`` are read from the module's
+        top-level assignments — the same attributes Alembic itself loads —
+        rather than inferred from the filename.  This keeps the chain
+        correct for any Alembic ``file_template`` (e.g. a ``date`` prefix)
+        and any ``rev_id`` format (revision IDs need not be lowercase hex),
+        and it tolerates type-annotated assignments such as
+        ``down_revision: Union[str, None] = get_down_revision(revision)``
+        that recent ``alembic init`` templates generate.
+        """
         content = path.read_text(encoding="utf-8")
         fname = path.name
-        revision = _extract_revision(fname)
+        assignments = _module_level_assignments(content)
 
-        if _DYNAMIC_DOWN_REVISION_RE.search(content):
+        revision = _string_value(assignments.get("revision"))
+        if revision is None:
+            # Fall back to the filename for files without a literal
+            # ``revision`` assignment, preserving older behaviour.
+            revision = _extract_revision(fname)
+
+        down_revision = assignments.get("down_revision")
+        if _is_get_down_revision_call(down_revision):
             return cls(
                 revision=revision,
                 filename=fname,
@@ -60,14 +73,56 @@ class MigrationFile:
                 static_down_revision=None,
             )
 
-        m = _DOWN_REVISION_RE.search(content)
         return cls(
             revision=revision,
             filename=fname,
             git_sequence=git_sequence,
             is_dynamic=False,
-            static_down_revision=m.group(1) if m else None,
+            static_down_revision=_string_value(down_revision),
         )
+
+
+def _module_level_assignments(content: str) -> dict[str, ast.expr]:
+    """Map each module-level assigned name to its value node.
+
+    Handles both plain (``x = ...``) and annotated (``x: T = ...``)
+    assignments and ignores anything nested inside a function or class,
+    mirroring how Alembic reads a migration module's attributes.
+    """
+    values: dict[str, ast.expr] = {}
+    for node in ast.parse(content).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    values[target.id] = node.value
+        elif (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.value is not None
+        ):
+            values[node.target.id] = node.value
+    return values
+
+
+def _string_value(node: ast.expr | None) -> str | None:
+    """Return the value of a string-literal node, else ``None``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def _is_get_down_revision_call(node: ast.expr | None) -> bool:
+    """Return whether *node* is a call to ``get_down_revision(...)``.
+
+    Matches both the bare ``get_down_revision(...)`` and an attribute form
+    such as ``agr.get_down_revision(...)``.
+    """
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id == "get_down_revision"
+    return isinstance(func, ast.Attribute) and func.attr == "get_down_revision"
 
 
 def _discover_versions_dir() -> pathlib.Path:

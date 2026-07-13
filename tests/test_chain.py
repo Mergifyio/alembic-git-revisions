@@ -897,3 +897,116 @@ def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
         _chain.build_chain.cache_clear()
 
     assert result == "bbbb"
+
+
+def test_revision_id_read_from_attribute_not_filename(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Revision IDs come from the ``revision`` attribute, not the filename.
+
+    Regression test: with a custom ``file_template`` the filename is prefixed
+    (here with a ``YYYYMMDD_`` date) and the revision IDs contain underscores,
+    so deriving the ID from the filename would truncate it at the first
+    underscore and mis-detect the static head.  A dynamic migration must still
+    chain onto the real static head ID read from the file.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "20260101_0001_root.py").write_text(
+        'revision = "20260101_0001"\ndown_revision = None\n',
+    )
+    (versions_dir / "20260102_0001_second.py").write_text(
+        'revision = "20260102_0001"\ndown_revision = "20260101_0001"\n',
+    )
+    (versions_dir / "20260103_0001_new.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "5c9eb899ede0"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+
+    git_order = [
+        "20260101_0001_root.py",
+        "20260102_0001_second.py",
+        "20260103_0001_new.py",
+    ]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        chain = _chain._build_chain_from_git(versions_dir)
+
+    assert chain == {"5c9eb899ede0": "20260102_0001"}
+
+
+def test_from_file_reads_annotated_dynamic(tmp_path: pathlib.Path) -> None:
+    """A type-annotated dynamic migration is classified as dynamic."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    path = versions_dir / "20260104_0001_dynamic.py"
+    path.write_text(
+        "from typing import Union\n"
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision: str = "20260104_0001"\n'
+        "down_revision: Union[str, None] = get_down_revision(revision)\n",
+    )
+
+    parsed = _chain.MigrationFile.from_file(path, git_sequence=0)
+
+    assert parsed.revision == "20260104_0001"
+    assert parsed.is_dynamic
+    assert parsed.static_down_revision is None
+
+
+def test_from_file_reads_annotated_static(tmp_path: pathlib.Path) -> None:
+    """A type-annotated static migration keeps its hardcoded down_revision."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    path = versions_dir / "20260105_0001_static.py"
+    path.write_text(
+        'revision: str = "20260105_0001"\n'
+        'down_revision: "str | None" = "20260104_0001"\n',
+    )
+
+    parsed = _chain.MigrationFile.from_file(path, git_sequence=0)
+
+    assert parsed.revision == "20260105_0001"
+    assert not parsed.is_dynamic
+    assert parsed.static_down_revision == "20260104_0001"
+
+
+def test_from_file_single_quotes_and_qualified_call(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Single-quoted IDs and a module-qualified call are handled."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    path = versions_dir / "20260106_0001_dynamic.py"
+    path.write_text(
+        "import alembic_git_revisions as agr\n"
+        "revision = '20260106_0001'\n"
+        "down_revision = agr.get_down_revision(revision)\n",
+    )
+
+    parsed = _chain.MigrationFile.from_file(path, git_sequence=0)
+
+    assert parsed.revision == "20260106_0001"
+    assert parsed.is_dynamic
+
+
+def test_from_file_falls_back_to_filename_without_revision_attr(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A file without a literal ``revision`` assignment uses the filename."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    path = versions_dir / "abcd_legacy.py"
+    path.write_text('down_revision = "beef"\n')
+
+    parsed = _chain.MigrationFile.from_file(path, git_sequence=0)
+
+    assert parsed.revision == "abcd"
+    assert not parsed.is_dynamic
+    assert parsed.static_down_revision == "beef"
