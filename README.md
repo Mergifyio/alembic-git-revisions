@@ -89,6 +89,8 @@ The library handles three types of migrations:
 - **Static** — has a hardcoded `down_revision`, managed manually (legacy migrations)
 - **Hybrid** — a static migration whose `down_revision` points to a dynamic one; participates in the dynamic ordering so the chain stays linear
 
+Classification reads the `revision` and `down_revision` attributes from each migration module (the same values Alembic loads), so any Alembic `file_template` and any `rev_id` format work.
+
 ## API
 
 ### `get_down_revision(revision, versions_dir=None)`
