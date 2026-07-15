@@ -129,7 +129,7 @@ def _down_revision_values(node: ast.expr | None) -> tuple[str, ...]:
     single = _string_value(node)
     if single is not None:
         return (single,)
-    if isinstance(node, ast.Tuple | ast.List):
+    if isinstance(node, (ast.Tuple, ast.List)):
         return tuple(
             value
             for element in node.elts
