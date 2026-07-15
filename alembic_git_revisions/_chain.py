@@ -22,8 +22,9 @@ class MigrationFile:
 
     * **dynamic** — uses ``get_down_revision()`` so its predecessor is
       determined at runtime from git history.
-    * **static** — has a hardcoded ``down_revision`` string and manages
-      its own chain.
+    * **static** — has a hardcoded ``down_revision`` and manages its own
+      chain.  A merge migration (``down_revision`` is a tuple/list of
+      several parents) is a static migration with more than one parent.
     * **hybrid** — a static migration whose ``down_revision`` points to a
       *dynamic* revision.  It already has a hardcoded predecessor but
       must participate in the dynamic ordering so that subsequent dynamic
@@ -34,7 +35,9 @@ class MigrationFile:
     filename: str
     git_sequence: int
     is_dynamic: bool
-    static_down_revision: str | None  # set only for static/hybrid files
+    # Hardcoded parent(s) for static/hybrid files; empty for dynamic files
+    # and for the static root.  A tuple with >1 entry is a merge migration.
+    static_down_revisions: tuple[str, ...]
 
     @classmethod
     def from_file(
@@ -74,7 +77,7 @@ class MigrationFile:
                 filename=fname,
                 git_sequence=git_sequence,
                 is_dynamic=True,
-                static_down_revision=None,
+                static_down_revisions=(),
             )
 
         return cls(
@@ -82,7 +85,7 @@ class MigrationFile:
             filename=fname,
             git_sequence=git_sequence,
             is_dynamic=False,
-            static_down_revision=_string_value(down_revision),
+            static_down_revisions=_down_revision_values(down_revision),
         )
 
 
@@ -113,6 +116,26 @@ def _string_value(node: ast.expr | None) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
+
+
+def _down_revision_values(node: ast.expr | None) -> tuple[str, ...]:
+    """Return the hardcoded parent revisions declared by ``down_revision``.
+
+    Handles a single revision (``"abc"``), a merge migration whose
+    ``down_revision`` is a tuple or list of parents (``("abc", "def")``)
+    and ``None``/absent.  Returns an empty tuple when there is no
+    hardcoded parent.
+    """
+    single = _string_value(node)
+    if single is not None:
+        return (single,)
+    if isinstance(node, ast.Tuple | ast.List):
+        return tuple(
+            value
+            for element in node.elts
+            if (value := _string_value(element)) is not None
+        )
+    return ()
 
 
 def _is_get_down_revision_call(node: ast.expr | None) -> bool:
@@ -272,24 +295,27 @@ def _parse_migration_files(
 def _find_static_head(files: list[MigrationFile]) -> str | None:
     """Find the single head of the purely-static migration chain.
 
-    Only considers static files whose ``down_revision`` stays within
-    the static set.  Hybrid files (static files pointing to a dynamic
-    revision) are excluded — they extend the dynamic chain, not the
-    static one.
+    Only considers static files whose parents stay within the static set.
+    Hybrid files (static files pointing to a dynamic revision) are
+    excluded — they extend the dynamic chain, not the static one.  Merge
+    migrations (more than one parent) are handled: every parent is treated
+    as consumed, so the branches they join do not look like extra heads.
     """
-    static_chain = {
-        f.revision: f.static_down_revision for f in files if not f.is_dynamic
-    }
+    static_revisions = {f.revision for f in files if not f.is_dynamic}
 
     pure_static = {
-        rev
-        for rev, down_rev in static_chain.items()
-        if down_rev is None or down_rev in static_chain
+        f.revision
+        for f in files
+        if not f.is_dynamic
+        and all(parent in static_revisions for parent in f.static_down_revisions)
     }
-    pure_static_down = {
-        static_chain[rev] for rev in pure_static if static_chain[rev] is not None
+    consumed = {
+        parent
+        for f in files
+        if f.revision in pure_static
+        for parent in f.static_down_revisions
     }
-    heads = pure_static - pure_static_down
+    heads = pure_static - consumed
 
     return heads.pop() if len(heads) == 1 else None
 
@@ -312,8 +338,21 @@ def _build_dynamic_chain(
     """
     dynamic_revisions = {f.revision for f in files if f.is_dynamic}
 
+    def _dynamic_parent(f: MigrationFile) -> str | None:
+        """The dynamic revision a hybrid static file points to, if any."""
+        if f.is_dynamic:
+            return None
+        return next(
+            (
+                parent
+                for parent in f.static_down_revisions
+                if parent in dynamic_revisions
+            ),
+            None,
+        )
+
     dynamic_participants: list[MigrationFile] = [
-        f for f in files if f.is_dynamic or f.static_down_revision in dynamic_revisions
+        f for f in files if f.is_dynamic or _dynamic_parent(f) is not None
     ]
 
     # O(1) lookup for each participant's git_sequence by revision.
@@ -321,17 +360,18 @@ def _build_dynamic_chain(
 
     # Map each hybrid's target revision to that target's git_sequence so
     # the hybrid sorts right after its target (not at its own commit time).
-    target_seq = {
-        f.static_down_revision: seq_by_rev.get(f.static_down_revision, f.git_sequence)
-        for f in dynamic_participants
-        if not f.is_dynamic and f.static_down_revision
-    }
+    target_seq: dict[str, int] = {}
+    for f in dynamic_participants:
+        target = _dynamic_parent(f)
+        if target is not None:
+            target_seq[target] = seq_by_rev.get(target, f.git_sequence)
 
     def _sort_key(f: MigrationFile) -> tuple[int, int, str]:
-        if not f.is_dynamic and f.static_down_revision in target_seq:
+        target = _dynamic_parent(f)
+        if target is not None:
             # Place hybrid right after its target (the 1 ensures it
             # sorts after the target itself at the same git_sequence).
-            return (target_seq[f.static_down_revision], 1, f.filename)
+            return (target_seq[target], 1, f.filename)
         return (f.git_sequence, 0, f.filename)
 
     dynamic_participants.sort(key=_sort_key)
