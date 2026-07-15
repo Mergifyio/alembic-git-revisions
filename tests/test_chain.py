@@ -494,7 +494,11 @@ def test_dynamic_inserted_before_hybrid_no_multiple_heads(
     # Reconstruct the full chain (static from files + dynamic from chain)
     # and walk it from root to head to verify the exact linear order.
     files = _chain._parse_migration_files(versions_dir, git_order)
-    full = {f.revision: f.static_down_revision for f in files if not f.is_dynamic}
+    full = {
+        f.revision: (f.static_down_revisions[0] if f.static_down_revisions else None)
+        for f in files
+        if not f.is_dynamic
+    }
     full.update(chain)
     assert _walk_chain(full) == ["aaaa", "bbbb", "dddd", "cccc"]
 
@@ -581,7 +585,11 @@ def test_mergify_engine_architecture(tmp_path: pathlib.Path) -> None:
 
     # Reconstruct the full chain (static + dynamic + hybrid) and walk it.
     files = _chain._parse_migration_files(versions_dir, git_order)
-    full = {f.revision: f.static_down_revision for f in files if not f.is_dynamic}
+    full = {
+        f.revision: (f.static_down_revisions[0] if f.static_down_revisions else None)
+        for f in files
+        if not f.is_dynamic
+    }
     full.update(chain)
 
     assert _walk_chain(full) == [
@@ -957,7 +965,7 @@ def test_from_file_reads_annotated_dynamic(tmp_path: pathlib.Path) -> None:
 
     assert parsed.revision == "20260104_0001"
     assert parsed.is_dynamic
-    assert parsed.static_down_revision is None
+    assert parsed.static_down_revisions == ()
 
 
 def test_from_file_reads_annotated_static(tmp_path: pathlib.Path) -> None:
@@ -974,7 +982,7 @@ def test_from_file_reads_annotated_static(tmp_path: pathlib.Path) -> None:
 
     assert parsed.revision == "20260105_0001"
     assert not parsed.is_dynamic
-    assert parsed.static_down_revision == "20260104_0001"
+    assert parsed.static_down_revisions == ("20260104_0001",)
 
 
 def test_from_file_single_quotes_and_qualified_call(
@@ -1009,7 +1017,7 @@ def test_from_file_falls_back_to_filename_without_revision_attr(
 
     assert parsed.revision == "abcd"
     assert not parsed.is_dynamic
-    assert parsed.static_down_revision == "beef"
+    assert parsed.static_down_revisions == ("beef",)
 
 
 def test_from_file_syntax_error_names_the_file(tmp_path: pathlib.Path) -> None:
@@ -1021,3 +1029,138 @@ def test_from_file_syntax_error_names_the_file(tmp_path: pathlib.Path) -> None:
 
     with pytest.raises(ValueError, match="20260107_0001_broken"):
         _chain.MigrationFile.from_file(path, git_sequence=0)
+
+
+def test_merge_migration_yields_single_static_head(tmp_path: pathlib.Path) -> None:
+    """A merge migration (tuple down_revision) joins two branches into one head.
+
+    Two static branches fork from a common root and are reconciled by a
+    merge migration whose ``down_revision`` is a tuple of both branch heads.
+    The static head must be the merge migration (not three separate heads),
+    and a following dynamic migration must chain onto it.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    # Two branches forking from the root (this is the multiple-heads state).
+    (versions_dir / "bbbb_branch1.py").write_text(
+        'revision = "bbbb"\ndown_revision = "aaaa"\n',
+    )
+    (versions_dir / "cccc_branch2.py").write_text(
+        'revision = "cccc"\ndown_revision = "aaaa"\n',
+    )
+    # Merge migration reconciling both branch heads.
+    (versions_dir / "mmmm_merge.py").write_text(
+        'revision = "mmmm"\ndown_revision: "tuple[str, ...]" = ("bbbb", "cccc")\n',
+    )
+    # New dynamic migration added after the merge.
+    (versions_dir / "dddd_new.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "dddd"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+
+    git_order = [
+        "aaaa_root.py",
+        "bbbb_branch1.py",
+        "cccc_branch2.py",
+        "mmmm_merge.py",
+        "dddd_new.py",
+    ]
+
+    files = _chain._parse_migration_files(versions_dir, git_order)
+    assert _chain._find_static_head(files) == "mmmm"
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        chain = _chain._build_chain_from_git(versions_dir)
+
+    assert chain == {"dddd": "mmmm"}
+
+
+def test_from_file_parses_merge_tuple(tmp_path: pathlib.Path) -> None:
+    """A merge migration keeps every parent and is classified static."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    path = versions_dir / "mmmm_merge.py"
+    path.write_text(
+        'revision = "mmmm"\ndown_revision = ("bbbb", "cccc")\n',
+    )
+
+    parsed = _chain.MigrationFile.from_file(path, git_sequence=0)
+
+    assert parsed.revision == "mmmm"
+    assert not parsed.is_dynamic
+    assert parsed.static_down_revisions == ("bbbb", "cccc")
+
+
+def test_from_file_parses_merge_list(tmp_path: pathlib.Path) -> None:
+    """A merge migration declared as a list is handled like a tuple."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    path = versions_dir / "mmmm_merge.py"
+    path.write_text(
+        'revision = "mmmm"\ndown_revision = ["bbbb", "cccc"]\n',
+    )
+
+    parsed = _chain.MigrationFile.from_file(path, git_sequence=0)
+
+    assert parsed.static_down_revisions == ("bbbb", "cccc")
+
+
+def test_merge_migration_before_dynamic_head(tmp_path: pathlib.Path) -> None:
+    """The dynamic chain starts from a merge-migration head.
+
+    Reproduces the real case where a project already carries a merge
+    migration in its history and then adopts dynamic revisions: the first
+    dynamic migration must chain onto the merge migration.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    (versions_dir / "bbbb_branch1.py").write_text(
+        'revision = "bbbb"\ndown_revision = "aaaa"\n',
+    )
+    (versions_dir / "cccc_branch2.py").write_text(
+        'revision = "cccc"\ndown_revision = "aaaa"\n',
+    )
+    (versions_dir / "mmmm_merge.py").write_text(
+        'revision = "mmmm"\ndown_revision = ("bbbb", "cccc")\n',
+    )
+    (versions_dir / "dddd_new1.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "dddd"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    (versions_dir / "eeee_new2.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "eeee"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+
+    git_order = [
+        "aaaa_root.py",
+        "bbbb_branch1.py",
+        "cccc_branch2.py",
+        "mmmm_merge.py",
+        "dddd_new1.py",
+        "eeee_new2.py",
+    ]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        chain = _chain._build_chain_from_git(versions_dir)
+
+    assert chain == {"dddd": "mmmm", "eeee": "dddd"}
