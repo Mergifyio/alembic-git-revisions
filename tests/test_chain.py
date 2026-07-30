@@ -1164,3 +1164,54 @@ def test_merge_migration_before_dynamic_head(tmp_path: pathlib.Path) -> None:
         chain = _chain._build_chain_from_git(versions_dir)
 
     assert chain == {"dddd": "mmmm", "eeee": "dddd"}
+
+
+def _git(repo: pathlib.Path, *args: str) -> None:
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def test_order_matches_on_a_release_branch_fed_by_merge_commits(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Chain order must not depend on which branch derives it.
+
+    Some repositories keep the integration branch linear (feature branches
+    land by rebase-and-merge) and use a merge commit only to promote a
+    release. Staging then builds from ``main`` and production from
+    ``release``, and both resolve the same migrations -- so the two must
+    derive the same order. ``alembic_version`` records only the head, so a
+    divergence would apply the same migrations in a different sequence in
+    production, silently.
+
+    A ``--first-parent`` walk cannot see this: on ``release`` the release's
+    migrations arrive in one merge commit, whose diff git lists
+    alphabetically, so the add order is lost.
+    """
+    repo = tmp_path / "repo"
+    versions = repo / "versions"
+    versions.mkdir(parents=True)
+
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@test.com")
+    _git(repo, "config", "user.name", "Test")
+
+    def add(revision: str, filename: str) -> None:
+        (versions / filename).write_text(f'revision = "{revision}"\n')
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", f"add {revision}")
+
+    add("root", "root_base.py")
+    _git(repo, "branch", "release")
+
+    # Filenames chosen so alphabetical order != add order: a first-parent
+    # walk over the promotion merge returns them the wrong way round.
+    add("zzzz", "zzzz_added_first.py")
+    add("aaaa", "aaaa_added_second.py")
+
+    expected = ["root_base.py", "zzzz_added_first.py", "aaaa_added_second.py"]
+    assert _chain._get_git_commit_order(versions) == expected
+
+    _git(repo, "checkout", "release")
+    _git(repo, "merge", "--no-ff", "-m", "Merge pull request from main", "main")
+
+    assert _chain._get_git_commit_order(versions) == expected

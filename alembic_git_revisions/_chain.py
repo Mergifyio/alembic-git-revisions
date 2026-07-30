@@ -195,7 +195,7 @@ def _is_shallow_clone(versions_dir: pathlib.Path) -> bool:
 def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
     """Get the commit order for migration files in *versions_dir*.
 
-    Uses ``git log --reverse --diff-filter=A --no-renames`` to list files
+    Uses ``git log --reverse --topo-order --diff-filter=A --no-renames`` to list files
     in the order they were first added, walking the linear commit tree
     from oldest to newest.
 
@@ -209,13 +209,21 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
     (keep-first) ensures that a file moved across directories keeps the
     ordering of its original add, not the later move.
 
-    ``--first-parent`` follows only the first parent at every merge
-    commit, so the walk stays on the integration branch (e.g. ``main``)
-    and never enters feature-branch ancestors.  Without it, a migration
-    whose original feature-branch commit is reachable from HEAD would
-    receive that early commit's date as its sequence — even when another
+    ``--topo-order`` makes the sequence a property of the commit graph
+    rather than of commit timestamps.  Without it, a migration whose
+    original feature-branch commit is reachable from HEAD would receive
+    that early commit's date as its sequence — even when another
     migration was merged onto main earlier — breaking the append-only
     chain order. (INC-1342.)
+
+    ``--first-parent`` also fixes that, but only for repositories that
+    merge feature branches into the integration branch.  It is wrong for
+    the inverse layout, where features land by rebase-and-merge (leaving
+    the integration branch linear) and a merge commit is used only to
+    promote a release: on the release branch a whole release's migrations
+    arrive in a single merge, whose diff git lists alphabetically, so the
+    add order is lost and the two branches derive different chains.
+    ``--topo-order`` is correct for both.
 
     ``--no-renames`` is critical: without it, git's rename detection can
     cause a renamed migration file (e.g. when changing its revision ID)
@@ -241,7 +249,7 @@ def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
                 "--reverse",
                 "--diff-filter=A",
                 "--no-renames",
-                "--first-parent",
+                "--topo-order",
                 "--format=",
                 "--name-only",
             ],
