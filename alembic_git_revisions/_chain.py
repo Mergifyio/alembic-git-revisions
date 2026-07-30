@@ -195,9 +195,12 @@ def _is_shallow_clone(versions_dir: pathlib.Path) -> bool:
 def _get_git_commit_order(versions_dir: pathlib.Path) -> list[str] | None:
     """Get the commit order for migration files in *versions_dir*.
 
-    Uses ``git log --reverse --topo-order --diff-filter=A --no-renames`` to list files
-    in the order they were first added, walking the linear commit tree
-    from oldest to newest.
+    Uses ``git log --reverse --topo-order --diff-filter=A --no-renames`` to
+    list files in the order they were first added, walking the commit graph
+    in topological order from oldest to newest.  The walk enters merges (see
+    ``--topo-order`` below), so the history it traverses need not be linear;
+    what topological order guarantees is that no commit is listed before an
+    ancestor it depends on.
 
     The command runs without a pathspec so that it scans the full repo
     history.  This is necessary to preserve chronological ordering when
