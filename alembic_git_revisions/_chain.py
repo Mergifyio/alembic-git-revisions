@@ -9,6 +9,12 @@ import pathlib
 import re
 import subprocess
 
+# Imported at runtime rather than under TYPE_CHECKING: this annotates public
+# API, and ``from __future__ import annotations`` turns annotations into
+# strings, so the name has to stay in module globals for
+# ``typing.get_type_hints()`` to resolve it.
+from collections.abc import Collection  # noqa: TC003
+
 _REVISION_FROM_FILENAME_RE = re.compile(r"^([a-f0-9]+)_")
 
 CHAIN_FILENAME = "revision_chain.json"
@@ -531,3 +537,80 @@ def generate_chain_file(versions_dir: pathlib.Path) -> None:
         json.dump(chain, f, indent=2, sort_keys=True)
         f.write("\n")
     print(f"Generated {chain_file} with {len(chain)} revisions")  # noqa: T201
+
+
+@dataclasses.dataclass(frozen=True)
+class DisplacedRevision:
+    """A hybrid migration chained ahead of revisions that predate it.
+
+    ``hybrid`` hardcodes ``target`` as its ``down_revision``.  Because a
+    hybrid is placed immediately after its target, every revision in
+    ``displaced`` -- added to git after the target but before the hybrid --
+    is re-parented onto the hybrid instead of staying where it was.
+
+    That is intended while none of them has run anywhere: it is what keeps
+    the chain linear when two branches fork from the same head.  It is
+    destructive once any of them has been applied.  A database whose
+    ``alembic_version`` records a displaced revision has already walked past
+    the point where the hybrid now sits, so ``alembic upgrade head`` finds
+    nothing to do and the hybrid never runs.
+
+    Git history cannot separate the two cases; only the set of applied
+    revisions can.  Pass one to :func:`find_displaced_revisions` to narrow
+    candidates down to the hybrids that are genuinely unreachable.
+    """
+
+    hybrid: str
+    target: str
+    displaced: tuple[str, ...]
+
+
+def _displaced_revisions(files: list[MigrationFile]) -> list[DisplacedRevision]:
+    """Find every hybrid that displaces revisions added before it."""
+    dynamic_revisions = {f.revision for f in files if f.is_dynamic}
+    sequence = {f.revision: f.git_sequence for f in files}
+
+    found: list[DisplacedRevision] = []
+    for hybrid in files:
+        if hybrid.is_dynamic:
+            continue
+        for target in hybrid.static_down_revisions:
+            if target not in dynamic_revisions:
+                continue
+            target_sequence = sequence[target]
+            displaced = tuple(
+                f.revision
+                for f in files
+                if f.is_dynamic
+                and target_sequence < f.git_sequence < hybrid.git_sequence
+            )
+            if displaced:
+                found.append(
+                    DisplacedRevision(hybrid.revision, target, displaced),
+                )
+    return found
+
+
+def find_displaced_revisions(
+    versions_dir: pathlib.Path,
+    applied: Collection[str] | None = None,
+) -> list[DisplacedRevision]:
+    """Report hybrids chained ahead of revisions that were added before them.
+
+    Without *applied* the result is advisory: it lists every hybrid whose
+    target is not the newest revision preceding it, which includes the benign
+    case of two branches forking from the same head.
+
+    Pass *applied* -- the revisions a database has actually run, e.g. read
+    from ``alembic_version`` or an equivalent record -- to keep only the
+    findings that matter.  A hybrid displacing an already-applied revision
+    sits behind that database's head and will never be executed.
+    """
+    found = _displaced_revisions(parse_versions_dir(versions_dir))
+    if applied is None:
+        return found
+    return [
+        revision
+        for revision in found
+        if any(displaced in applied for displaced in revision.displaced)
+    ]

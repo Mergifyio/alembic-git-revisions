@@ -4,10 +4,13 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
+import typing
 from unittest import mock
 
 import pytest
 
+import alembic_git_revisions
 from alembic_git_revisions import _chain
 
 
@@ -1359,3 +1362,428 @@ def test_chain_filename_is_the_generated_file(tmp_path: pathlib.Path) -> None:
         _chain.generate_chain_file(versions_dir)
 
     assert (versions_dir.parent / _chain.CHAIN_FILENAME).is_file()
+
+
+def _write_splice_scenario(versions_dir: pathlib.Path, hybrid_target: str) -> list[str]:
+    """Root, three dynamic migrations, then a hybrid pointing at *hybrid_target*.
+
+    ``bbbb -> cccc -> dddd`` are dynamic and chain in that order; ``eeee`` is
+    added last with a hardcoded ``down_revision``.  Returns the git order.
+    """
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    for revision, name in (("bbbb", "one"), ("cccc", "two"), ("dddd", "three")):
+        (versions_dir / f"{revision}_{name}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+    (versions_dir / "eeee_manual.py").write_text(
+        f'revision = "eeee"\ndown_revision = "{hybrid_target}"\n',
+    )
+    return [
+        "aaaa_root.py",
+        "bbbb_one.py",
+        "cccc_two.py",
+        "dddd_three.py",
+        "eeee_manual.py",
+    ]
+
+
+def test_find_displaced_revisions_reports_stale_target(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A hybrid pointing behind the head displaces the revisions in between."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="bbbb")
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        displaced = _chain.find_displaced_revisions(versions_dir)
+        chain = _chain._build_chain_from_git(versions_dir)
+
+    assert displaced == [
+        _chain.DisplacedRevision(
+            hybrid="eeee",
+            target="bbbb",
+            displaced=("cccc", "dddd"),
+        ),
+    ]
+    # What the report describes is what the chain actually does: cccc no
+    # longer follows bbbb, it follows the hybrid inserted behind it.
+    assert chain["cccc"] == "eeee"
+
+
+def test_find_displaced_revisions_ignores_hybrid_on_head(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Hardcoding the newest revision displaces nothing."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="dddd")
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        assert _chain.find_displaced_revisions(versions_dir) == []
+
+
+@pytest.mark.parametrize(
+    ("applied", "expected_hybrids"),
+    [
+        pytest.param(
+            {"aaaa", "bbbb", "cccc", "dddd"},
+            ["eeee"],
+            id="displaced-applied",
+        ),
+        pytest.param({"aaaa", "bbbb"}, [], id="displaced-not-applied"),
+        pytest.param(set(), [], id="nothing-applied"),
+    ],
+)
+def test_find_displaced_revisions_filters_by_applied(
+    tmp_path: pathlib.Path,
+    applied: set[str],
+    expected_hybrids: list[str],
+) -> None:
+    """Only a hybrid displacing an already-applied revision is unreachable."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="bbbb")
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        found = _chain.find_displaced_revisions(versions_dir, applied=applied)
+
+    assert [revision.hybrid for revision in found] == expected_hybrids
+
+
+def test_find_displaced_revisions_reads_every_merge_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A merge migration is checked through each of its hardcoded parents."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    for revision, name in (("bbbb", "one"), ("cccc", "two")):
+        (versions_dir / f"{revision}_{name}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+    (versions_dir / "dddd_merge.py").write_text(
+        'revision = "dddd"\ndown_revision = ("aaaa", "bbbb")\n',
+    )
+
+    git_order = ["aaaa_root.py", "bbbb_one.py", "cccc_two.py", "dddd_merge.py"]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        displaced = _chain.find_displaced_revisions(versions_dir)
+
+    assert displaced == [
+        _chain.DisplacedRevision(hybrid="dddd", target="bbbb", displaced=("cccc",)),
+    ]
+
+
+def test_find_displaced_revisions_without_git(tmp_path: pathlib.Path) -> None:
+    """Ordering cannot be guessed, so a missing git history is an error."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    with (
+        mock.patch.object(_chain, "_get_git_commit_order", return_value=None),
+        pytest.raises(RuntimeError, match="Cannot read git history"),
+    ):
+        _chain.find_displaced_revisions(versions_dir)
+
+
+def test_find_displaced_revisions_reports_the_benign_fork_case(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Advisory mode cannot exclude a legitimate fork from the same head.
+
+    This is the layout of ``test_dynamic_inserted_before_hybrid_no_multiple_heads``:
+    two branches fork from dynamic head ``bbbb``, one adds a dynamic migration
+    and the other a hybrid, and the dynamic one merges first. The resulting
+    chain is correct, yet in git history it is indistinguishable from a hybrid
+    hardcoded behind the head. Advisory mode therefore reports it, and only
+    ``applied`` can rule it out.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    for revision, name in (("bbbb", "base"), ("cccc", "branch_a")):
+        (versions_dir / f"{revision}_{name}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+    (versions_dir / "dddd_branch_b.py").write_text(
+        'revision = "dddd"\ndown_revision = "bbbb"\n',
+    )
+
+    git_order = [
+        "aaaa_root.py",
+        "bbbb_base.py",
+        "cccc_branch_a.py",
+        "dddd_branch_b.py",
+    ]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        candidates = _chain.find_displaced_revisions(versions_dir)
+        # cccc has not been applied anywhere, so nothing is confirmed.
+        confirmed = _chain.find_displaced_revisions(
+            versions_dir,
+            applied={"aaaa", "bbbb"},
+        )
+
+    assert [c.hybrid for c in candidates] == ["dddd"]
+    assert confirmed == []
+
+
+def test_find_displaced_revisions_reports_each_problematic_merge_parent(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A merge migration displacing through two parents yields two findings."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    for revision, name in (
+        ("bbbb", "one"),
+        ("cccc", "two"),
+        ("dddd", "three"),
+        ("eeee", "four"),
+    ):
+        (versions_dir / f"{revision}_{name}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+    # Both hardcoded parents have later dynamic revisions after them.
+    (versions_dir / "ffff_merge.py").write_text(
+        'revision = "ffff"\ndown_revision = ("bbbb", "cccc")\n',
+    )
+
+    git_order = [
+        "aaaa_root.py",
+        "bbbb_one.py",
+        "cccc_two.py",
+        "dddd_three.py",
+        "eeee_four.py",
+        "ffff_merge.py",
+    ]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        displaced = _chain.find_displaced_revisions(versions_dir)
+
+    # One entry per problematic parent, both keyed by the same hybrid: a
+    # caller keying findings by `hybrid` alone would silently drop one.
+    assert displaced == [
+        _chain.DisplacedRevision(
+            hybrid="ffff",
+            target="bbbb",
+            displaced=("cccc", "dddd", "eeee"),
+        ),
+        _chain.DisplacedRevision(
+            hybrid="ffff",
+            target="cccc",
+            displaced=("dddd", "eeee"),
+        ),
+    ]
+
+
+_ARGPARSE_USAGE_ERROR = 2
+
+
+def _run_cli(argv: list[str], git_order: list[str]) -> int:
+    """Run the CLI with *argv*, returning its exit code."""
+    with (
+        mock.patch.object(_chain, "_get_git_commit_order", return_value=git_order),
+        mock.patch.object(sys, "argv", ["alembic-git-revisions", *argv]),
+        pytest.raises(SystemExit) as excinfo,
+    ):
+        alembic_git_revisions._cli()
+    code = excinfo.value.code
+    assert isinstance(code, int)
+    return code
+
+
+def test_cli_check_without_applied_never_fails(
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Advisory mode reports, but must not fail a build on an unproven finding."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="bbbb")
+
+    assert _run_cli(["--check", str(versions_dir)], git_order) == 0
+
+    out = capsys.readouterr().out
+    assert "eeee" in out
+    # The wording must stay conditional: nothing has been proven wrong.
+    assert "Pass --applied to decide." in out
+    assert "will not run there" in out
+
+
+def test_cli_check_with_applied_fails_and_names_the_blocker(
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Confirmed mode is backed by an applied revision, so it exits non-zero."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="bbbb")
+    applied_file = tmp_path / "applied.txt"
+    applied_file.write_text("# current head and ancestors\naaaa\nbbbb\ncccc\n\n")
+
+    exit_code = _run_cli(
+        ["--check", "--applied", str(applied_file), str(versions_dir)],
+        git_order,
+    )
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "cccc is already applied" in err
+    assert "will never run it" in err
+
+
+def test_cli_check_with_applied_is_clean_when_nothing_ran(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A displaced revision that no database applied is not a failure."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="bbbb")
+    applied_file = tmp_path / "applied.txt"
+    applied_file.write_text("aaaa\nbbbb\n")
+
+    exit_code = _run_cli(
+        ["--check", "--applied", str(applied_file), str(versions_dir)],
+        git_order,
+    )
+
+    assert exit_code == 0
+
+
+def test_cli_applied_requires_check(tmp_path: pathlib.Path) -> None:
+    """--applied is meaningless without --check, so it is rejected."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    applied_file = tmp_path / "applied.txt"
+    applied_file.write_text("aaaa\n")
+
+    argv = ["--applied", str(applied_file), str(versions_dir)]
+    assert _run_cli(argv, []) == _ARGPARSE_USAGE_ERROR
+
+
+@pytest.mark.parametrize(
+    "argv_extra",
+    [
+        pytest.param([], id="generate"),
+        pytest.param(["--check"], id="check"),
+    ],
+)
+def test_cli_reports_missing_git_without_a_traceback(
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+    argv_extra: list[str],
+) -> None:
+    """A shallow clone is an environment problem, not a crash."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+
+    argv = ["alembic-git-revisions", *argv_extra, str(versions_dir)]
+    with (
+        mock.patch.object(_chain, "_get_git_commit_order", return_value=None),
+        mock.patch.object(sys, "argv", argv),
+        pytest.raises(SystemExit) as excinfo,
+    ):
+        alembic_git_revisions._cli()
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert err.startswith("alembic-git-revisions: error: ")
+    assert "Traceback" not in err
+
+
+def test_cli_reports_an_unreadable_applied_file(
+    tmp_path: pathlib.Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bad --applied path is a message, not a traceback."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="bbbb")
+
+    argv = ["--check", "--applied", str(tmp_path / "nope.txt"), str(versions_dir)]
+    assert _run_cli(argv, git_order) == 1
+    assert "error: " in capsys.readouterr().err
+
+
+def test_public_annotations_resolve_at_runtime() -> None:
+    """Public signatures must survive typing.get_type_hints().
+
+    ``from __future__ import annotations`` makes annotations strings, so a
+    name imported only under TYPE_CHECKING would raise NameError here and
+    break any consumer that introspects the signature.
+    """
+    hints = typing.get_type_hints(alembic_git_revisions.find_displaced_revisions)
+
+    assert "applied" in hints
+
+
+def test_cli_without_check_still_generates_the_chain_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """The original positional form keeps working unchanged."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    git_order = _write_splice_scenario(versions_dir, hybrid_target="dddd")
+
+    argv = ["alembic-git-revisions", str(versions_dir)]
+    with (
+        mock.patch.object(_chain, "_get_git_commit_order", return_value=git_order),
+        mock.patch.object(sys, "argv", argv),
+    ):
+        alembic_git_revisions._cli()
+
+    chain_file = versions_dir.parent / _chain.CHAIN_FILENAME
+    assert json.loads(chain_file.read_text()) == {
+        "bbbb": "aaaa",
+        "cccc": "bbbb",
+        "dddd": "cccc",
+    }

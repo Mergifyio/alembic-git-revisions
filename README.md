@@ -21,7 +21,7 @@ Instead of hardcoding `down_revision`, this library determines the migration cha
 This means:
 - New migrations never conflict with each other
 - The chain is always linear, regardless of branch merge order
-- Existing migrations with hardcoded `down_revision` continue to work
+- Existing migrations with hardcoded `down_revision` continue to work, as long as they are not chained behind a revision that has already been applied somewhere (see [Hardcoded `down_revision` on a deployed database](#hardcoded-down_revision-on-a-deployed-database))
 
 ## Installation
 
@@ -91,6 +91,49 @@ The library handles three types of migrations:
 
 Classification reads the `revision` and `down_revision` attributes from each migration module (the same values Alembic loads), so any Alembic `file_template` and any `rev_id` format work.
 
+## Hardcoded `down_revision` on a deployed database
+
+A hybrid is placed immediately after the revision it points at, so any dynamic migration added between the two is re-parented onto the hybrid. That is what keeps the chain linear when two branches fork from the same head, and it is safe while none of those migrations has run yet.
+
+It stops being safe once one of them has been applied. Say `bbbb -> cccc -> dddd` are already deployed, and a new migration hardcodes `down_revision = "bbbb"`:
+
+```
+chain before:  aaaa -> bbbb -> cccc -> dddd          alembic_version = dddd
+chain after:   aaaa -> bbbb -> eeee -> cccc -> dddd  alembic_version = dddd
+```
+
+`eeee` now sits behind the recorded head. `alembic upgrade head` walks down from `dddd`, finds every revision already applied, and does nothing. The migration never runs, and nothing reports an error.
+
+**The rule: only hardcode `down_revision` onto the current head.** Anything older is spliced into history the database has already walked past. Prefer `get_down_revision(revision)`, which cannot pick a stale parent.
+
+To check an existing tree:
+
+```bash
+alembic-git-revisions --check /path/to/versions
+```
+
+This lists every hybrid chained ahead of earlier revisions and **exits 0**, because git history alone cannot prove a finding is a real problem. A hybrid added by a branch that forked from the same head produces exactly the same shape, and that case is benign. Treat the output as something to look at, not as a failure.
+
+Only the revisions a database has actually applied separate the two. Pass them in to narrow the report to migrations that provably cannot run, which **exits non-zero**:
+
+```bash
+psql -Atc 'select version_num from alembic_version' \
+  | alembic-git-revisions --check --applied - /path/to/versions
+```
+
+That is the form worth gating CI on. Note `alembic_version` records only the current head, so for a full picture supply every revision reachable from it. The same distinction is available from Python:
+
+```python
+from alembic_git_revisions import find_displaced_revisions
+
+# advisory: includes the benign fork-from-the-same-head case
+candidates = find_displaced_revisions(versions_dir)
+
+# confirmed: only what cannot run on this database
+for found in find_displaced_revisions(versions_dir, applied=applied):
+    print(f"{found.hybrid} will never run on this database")
+```
+
 ## API
 
 ### `get_down_revision(revision, versions_dir=None)`
@@ -126,6 +169,10 @@ A frozen dataclass describing one parsed migration:
 | `static_down_revisions` | hardcoded parents; more than one means a merge migration |
 
 `git_sequence` is a position within one particular parse, not a stable property of the file. Files absent from git history all share the same end-of-list sentinel and are separated only by `filename`, which is why `parse_versions_dir` sorts on both.
+
+### `find_displaced_revisions(versions_dir, applied=None)`
+
+Returns a list of `DisplacedRevision(hybrid, target, displaced)`, one per hybrid that is chained ahead of revisions added before it. Without `applied` the result is advisory and includes the benign fork-from-the-same-head case. Pass `applied`, the revisions a database has actually run, to keep only the hybrids that can never execute on it. See [Hardcoded `down_revision` on a deployed database](#hardcoded-down_revision-on-a-deployed-database).
 
 ### `CHAIN_FILENAME`
 
