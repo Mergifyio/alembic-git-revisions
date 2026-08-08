@@ -21,6 +21,12 @@ import pathlib
 import sys
 
 from alembic_git_revisions._chain import (
+    CHAIN_FILENAME as CHAIN_FILENAME,
+)
+from alembic_git_revisions._chain import (
+    MigrationFile as MigrationFile,
+)
+from alembic_git_revisions._chain import (
     build_chain as build_chain,
 )
 from alembic_git_revisions._chain import (
@@ -28,6 +34,9 @@ from alembic_git_revisions._chain import (
 )
 from alembic_git_revisions._chain import (
     get_down_revision as get_down_revision,
+)
+from alembic_git_revisions._chain import (
+    parse_versions_dir as parse_versions_dir,
 )
 
 

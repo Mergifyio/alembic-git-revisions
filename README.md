@@ -105,6 +105,32 @@ Generates `revision_chain.json` from git history. Run this before building Docke
 
 Returns the full `{revision: down_revision}` dict. Cached per `versions_dir`. Use `build_chain.cache_clear()` to reset in tests.
 
+### `parse_versions_dir(versions_dir)`
+
+Returns the migrations in `versions_dir` as a list of `MigrationFile`, so tooling can inspect classification and ordering without building a chain.
+
+The order is the raw order files were added to git. It is **not** the order the chain walks: `build_chain` re-parents a hybrid to sit immediately after the revision it hardcodes, which can move it far from its own add position. Use `build_chain` when you want traversal order.
+
+Unlike `build_chain`, this never falls back to `revision_chain.json`, because that file records only `{revision: down_revision}` and carries neither classification nor ordering. Git is required, and its absence raises `RuntimeError` rather than returning a plausible wrong order. Results are not cached.
+
+### `MigrationFile`
+
+A frozen dataclass describing one parsed migration:
+
+| Field | Meaning |
+|---|---|
+| `revision` | the revision id, read from the module's `revision` attribute |
+| `filename` | the file's basename |
+| `git_sequence` | position within the parse that produced it (see below) |
+| `is_dynamic` | whether `down_revision` calls `get_down_revision()` |
+| `static_down_revisions` | hardcoded parents; more than one means a merge migration |
+
+`git_sequence` is a position within one particular parse, not a stable property of the file. Files absent from git history all share the same end-of-list sentinel and are separated only by `filename`, which is why `parse_versions_dir` sorts on both.
+
+### `CHAIN_FILENAME`
+
+Name of the generated chain file, `revision_chain.json`. Use it instead of hardcoding the string when locating or cleaning up the generated artifact.
+
 ## License
 
 Apache-2.0
