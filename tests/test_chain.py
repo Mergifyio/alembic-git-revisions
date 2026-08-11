@@ -1215,3 +1215,147 @@ def test_order_matches_on_a_release_branch_fed_by_merge_commits(
     _git(repo, "merge", "--no-ff", "-m", "Merge pull request from main", "main")
 
     assert _chain._get_git_commit_order(versions) == expected
+
+
+def test_parse_versions_dir_classifies_in_git_order(tmp_path: pathlib.Path) -> None:
+    """The parsed view carries classification and git order, not a chain."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    (versions_dir / "bbbb_dynamic.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "bbbb"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+    (versions_dir / "cccc_manual.py").write_text(
+        'revision = "cccc"\ndown_revision = "bbbb"\n',
+    )
+
+    # Deliberately not alphabetical, to show the order comes from git.
+    git_order = ["aaaa_root.py", "cccc_manual.py", "bbbb_dynamic.py"]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        files = _chain.parse_versions_dir(versions_dir)
+
+    assert [f.revision for f in files] == ["aaaa", "cccc", "bbbb"]
+    assert [f.is_dynamic for f in files] == [False, False, True]
+    assert files[1].static_down_revisions == ("bbbb",)
+    assert files[0].static_down_revisions == ()
+
+
+def test_parse_versions_dir_places_uncommitted_files_last(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Files absent from git history sort last, tie-broken by filename.
+
+    They all share the same end-of-list sentinel, so ``filename`` is the
+    only thing separating them and the order must not depend on the
+    filesystem's glob order.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    # Written in reverse of their filename order, and neither is committed.
+    for revision, name in (("dddd", "zzz_new"), ("cccc", "mmm_new")):
+        (versions_dir / f"{name}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=["aaaa_root.py"],
+    ):
+        files = _chain.parse_versions_dir(versions_dir)
+
+    assert [f.revision for f in files] == ["aaaa", "cccc", "dddd"]
+    assert files[1].git_sequence == files[2].git_sequence
+
+
+def test_parse_versions_dir_order_is_add_order_not_chain_order(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A hybrid keeps its add position here, but moves in the built chain.
+
+    ``build_chain`` re-parents a hybrid to sit right after the revision it
+    hardcodes; ``parse_versions_dir`` reports raw add order and does not.
+    Callers must not treat one as the other.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    for revision, name in (("bbbb", "one"), ("cccc", "two")):
+        (versions_dir / f"{revision}_{name}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+    # Added last, but hardcoded onto bbbb, so the chain pulls it earlier.
+    (versions_dir / "dddd_hybrid.py").write_text(
+        'revision = "dddd"\ndown_revision = "bbbb"\n',
+    )
+
+    git_order = [
+        "aaaa_root.py",
+        "bbbb_one.py",
+        "cccc_two.py",
+        "dddd_hybrid.py",
+    ]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        files = _chain.parse_versions_dir(versions_dir)
+        chain = _chain._build_chain_from_git(versions_dir)
+
+    # Add order: the hybrid is last.
+    assert [f.revision for f in files] == ["aaaa", "bbbb", "cccc", "dddd"]
+    # Chain order: cccc now follows the hybrid, so dddd precedes it.
+    assert chain["cccc"] == "dddd"
+
+
+def test_parse_versions_dir_without_git(tmp_path: pathlib.Path) -> None:
+    """Ordering cannot be guessed, so a missing git history is an error."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    with (
+        mock.patch.object(_chain, "_get_git_commit_order", return_value=None),
+        pytest.raises(RuntimeError, match="Cannot read git history"),
+    ):
+        _chain.parse_versions_dir(versions_dir)
+
+
+def test_chain_filename_is_the_generated_file(tmp_path: pathlib.Path) -> None:
+    """The public constant names the file generate_chain_file writes."""
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=["aaaa_root.py"],
+    ):
+        _chain.generate_chain_file(versions_dir)
+
+    assert (versions_dir.parent / _chain.CHAIN_FILENAME).is_file()

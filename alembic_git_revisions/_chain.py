@@ -11,7 +11,7 @@ import subprocess
 
 _REVISION_FROM_FILENAME_RE = re.compile(r"^([a-f0-9]+)_")
 
-_CHAIN_FILENAME = "revision_chain.json"
+CHAIN_FILENAME = "revision_chain.json"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,6 +29,15 @@ class MigrationFile:
       *dynamic* revision.  It already has a hardcoded predecessor but
       must participate in the dynamic ordering so that subsequent dynamic
       files chain after it (not after the dynamic revision it points to).
+
+    ``git_sequence`` is a position within one particular parse, not a
+    stable property of the file: it indexes the ``git_order`` list that
+    produced this instance.  Every file missing from that list (typically
+    because it is not committed yet) receives the same end-of-list
+    sentinel, so those files tie and are separated only by sorting on
+    ``filename`` as well.  Construct instances through
+    :func:`parse_versions_dir` rather than calling ``from_file``
+    directly, which would require inventing a value for it.
     """
 
     revision: str
@@ -286,6 +295,39 @@ def _extract_revision(filename: str) -> str:
     return m.group(1)
 
 
+def parse_versions_dir(versions_dir: pathlib.Path) -> list[MigrationFile]:
+    """Parse and classify every migration in *versions_dir*, in git add order.
+
+    Exposes the same view the chain builder works from, for callers that
+    want to inspect classification or ordering without building a chain.
+
+    The order is the raw order files were added to git, sorted by
+    ``(git_sequence, filename)``.  It is **not** the order the resulting
+    chain walks: :func:`build_chain` re-parents a hybrid to sit
+    immediately after the revision it hardcodes, which can move it far
+    from its own add position.  Use :func:`build_chain` when the question
+    is what Alembic will traverse.
+
+    Unlike :func:`build_chain` this never falls back to a generated chain
+    file, because that file records only ``{revision: down_revision}``;
+    it carries neither the classification nor the ordering this returns,
+    so there is nothing to reconstruct from.  Git is therefore required,
+    and its absence raises rather than yielding a plausible wrong order.
+
+    Results are not cached, so each call re-reads git and re-parses every
+    file and will pick up edits made since the last call.
+    """
+    git_order = _get_git_commit_order(versions_dir)
+    if git_order is None:
+        msg = (
+            f"Cannot read git history for {versions_dir}: git is not available "
+            f"or this is a shallow clone."
+        )
+        raise RuntimeError(msg)
+    files = _parse_migration_files(versions_dir, git_order)
+    return sorted(files, key=lambda f: (f.git_sequence, f.filename))
+
+
 def _parse_migration_files(
     versions_dir: pathlib.Path,
     git_order: list[str],
@@ -434,7 +476,7 @@ def build_chain(versions_dir: pathlib.Path) -> dict[str, str]:
     The result is cached per *versions_dir*.  Use
     ``build_chain.cache_clear()`` to reset (e.g. in tests).
     """
-    chain_file = versions_dir.parent / _CHAIN_FILENAME
+    chain_file = versions_dir.parent / CHAIN_FILENAME
     if chain_file.exists():
         return _load_chain_from_file(chain_file)
     chain = _build_chain_from_git(versions_dir)
@@ -484,7 +526,7 @@ def generate_chain_file(versions_dir: pathlib.Path) -> None:
             "git is not available or this is a shallow clone."
         )
         raise RuntimeError(msg)
-    chain_file = versions_dir.parent / _CHAIN_FILENAME
+    chain_file = versions_dir.parent / CHAIN_FILENAME
     with chain_file.open("w", encoding="utf-8") as f:
         json.dump(chain, f, indent=2, sort_keys=True)
         f.write("\n")
