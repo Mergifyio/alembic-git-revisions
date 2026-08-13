@@ -1359,3 +1359,146 @@ def test_chain_filename_is_the_generated_file(tmp_path: pathlib.Path) -> None:
         _chain.generate_chain_file(versions_dir)
 
     assert (versions_dir.parent / _chain.CHAIN_FILENAME).is_file()
+
+
+def test_hybrid_behind_the_head_is_spliced_in_and_keeps_one_head(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A hybrid may hardcode a revision that is no longer the head.
+
+    ``eeee`` points at ``bbbb`` when the chain has already reached
+    ``dddd``.  It is placed immediately after ``bbbb`` and the revisions
+    in between are re-parented onto it, so the chain stays linear and
+    single-headed -- the property this library exists to guarantee.
+
+    This is intended, not incidental.  Pointing a migration at a revision
+    a database has already passed is an authoring error; the rule is to
+    hardcode only onto the current head, and enforcing it belongs in the
+    merge queue rather than here (see #47).  The test pins the chain
+    shape so a later change cannot quietly turn it into a fork.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+
+    (versions_dir / "aaaa_root.py").write_text(
+        'revision = "aaaa"\ndown_revision = None\n',
+    )
+    for revision, name in (("bbbb", "one"), ("cccc", "two"), ("dddd", "three")):
+        (versions_dir / f"{revision}_{name}.py").write_text(
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n",
+        )
+    # Added last, but hardcoded three revisions behind the head.
+    (versions_dir / "eeee_manual.py").write_text(
+        'revision = "eeee"\ndown_revision = "bbbb"\n',
+    )
+
+    git_order = [
+        "aaaa_root.py",
+        "bbbb_one.py",
+        "cccc_two.py",
+        "dddd_three.py",
+        "eeee_manual.py",
+    ]
+
+    with mock.patch.object(
+        _chain,
+        "_get_git_commit_order",
+        return_value=git_order,
+    ):
+        chain = _chain._build_chain_from_git(versions_dir)
+        files = _chain._parse_migration_files(versions_dir, git_order)
+
+    # cccc follows the spliced-in hybrid, not bbbb as it did before eeee
+    # existed.  dddd is untouched: only the revision directly after the
+    # hybrid's target changes parent.
+    assert chain == {"bbbb": "aaaa", "cccc": "eeee", "dddd": "cccc"}
+
+    full = {
+        f.revision: (f.static_down_revisions[0] if f.static_down_revisions else None)
+        for f in files
+        if not f.is_dynamic
+    }
+    full.update(chain)
+    # No fork: _walk_chain fails loudly if two revisions share a parent.
+    assert _walk_chain(full) == ["aaaa", "bbbb", "eeee", "cccc", "dddd"]
+
+
+def test_concurrent_branches_keep_one_head_when_the_hybrid_merges_second(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Two branches fork from the same head and the hybrid lands last.
+
+    Branch A adds a generated migration, branch B a hand-written one
+    hardcoded onto the head both forked from.  A merges first, so the
+    generated migration precedes the hybrid in git order and both would
+    otherwise point at ``bbbb`` -- a fork, and ``MultipleHeads``.  The
+    hybrid is spliced in behind the generated migration instead, keeping
+    a single head.
+
+    ``test_dynamic_inserted_before_hybrid_no_multiple_heads`` pins the
+    same chain shape from a hardcoded git order.  This one drives real
+    branches and real merge commits, so it also covers
+    ``_get_git_commit_order`` actually producing the order that test
+    assumes.
+    """
+    repo = tmp_path / "repo"
+    versions = repo / "versions"
+    versions.mkdir(parents=True)
+
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.email", "test@test.com")
+    _git(repo, "config", "user.name", "Test")
+
+    def add(filename: str, body: str) -> None:
+        (versions / filename).write_text(body)
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", f"add {filename}")
+
+    def dynamic(revision: str) -> str:
+        return (
+            "from alembic_git_revisions import get_down_revision\n"
+            f'revision = "{revision}"\n'
+            "down_revision = get_down_revision(revision)\n"
+        )
+
+    add("aaaa_root.py", 'revision = "aaaa"\ndown_revision = None\n')
+    add("bbbb_base.py", dynamic("bbbb"))  # the head both branches fork from
+
+    # Branch B: hand-written, hardcoded onto the head it can see.
+    _git(repo, "checkout", "-b", "branch-b")
+    add("dddd_manual.py", 'revision = "dddd"\ndown_revision = "bbbb"\n')
+
+    # Branch A: an ordinary generated migration, merged first.
+    _git(repo, "checkout", "main")
+    _git(repo, "checkout", "-b", "branch-a")
+    add("cccc_generated.py", dynamic("cccc"))
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--no-ff", "-m", "Merge branch-a", "branch-a")
+
+    assert _chain._build_chain_from_git(versions) == {"bbbb": "aaaa", "cccc": "bbbb"}
+
+    _git(repo, "merge", "--no-ff", "-m", "Merge branch-b", "branch-b")
+
+    git_order = _chain._get_git_commit_order(versions)
+    assert git_order == [
+        "aaaa_root.py",
+        "bbbb_base.py",
+        "cccc_generated.py",
+        "dddd_manual.py",
+    ]
+
+    chain = _chain._build_chain_from_git(versions)
+    # cccc moves off bbbb onto the hybrid, so bbbb has exactly one child.
+    assert chain == {"bbbb": "aaaa", "cccc": "dddd"}
+
+    assert git_order is not None
+    files = _chain._parse_migration_files(versions, git_order)
+    full = {
+        f.revision: (f.static_down_revisions[0] if f.static_down_revisions else None)
+        for f in files
+        if not f.is_dynamic
+    }
+    full.update(chain)
+    assert _walk_chain(full) == ["aaaa", "bbbb", "dddd", "cccc"]
