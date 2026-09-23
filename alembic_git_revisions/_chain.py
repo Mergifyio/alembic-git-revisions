@@ -170,14 +170,25 @@ def _discover_versions_dir() -> pathlib.Path:
     """
     this_pkg = pathlib.Path(__file__).parent
 
-    for frame_info in inspect.stack():
-        caller_path = pathlib.Path(frame_info.filename).resolve()
-        # Skip frames from this package
-        try:
-            caller_path.relative_to(this_pkg)
-        except ValueError:
-            # Outside this package — this is the migration file
-            return caller_path.parent
+    # Walk the frame objects themselves rather than `inspect.stack()`, which
+    # also reads the source context of every frame on the stack: called once
+    # per migration, that made up most of the time it takes to build a long
+    # revision map, and only the filename is needed here.
+    frame = inspect.currentframe()
+    try:
+        while frame is not None:
+            caller_path = pathlib.Path(frame.f_code.co_filename).resolve()
+            # Skip frames from this package
+            try:
+                caller_path.relative_to(this_pkg)
+            except ValueError:
+                # Outside this package — this is the migration file
+                return caller_path.parent
+            frame = frame.f_back
+    finally:
+        # A frame references its locals, this one included: drop it so the
+        # reference cycle does not outlive the call.
+        del frame
 
     msg = (
         "Cannot auto-discover versions directory: "

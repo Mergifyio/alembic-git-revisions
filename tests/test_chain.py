@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import runpy
 import subprocess
 from unittest import mock
 
@@ -905,6 +906,34 @@ def test_auto_discover_versions_dir(tmp_path: pathlib.Path) -> None:
         _chain.build_chain.cache_clear()
 
     assert result == "bbbb"
+
+
+def test_auto_discover_versions_dir_from_a_real_migration_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    """A migration calling get_down_revision() finds its own versions_dir.
+
+    Exercises the stack walk itself, which the test above mocks out: the
+    migration module is executed from inside ``versions/``, one call away from
+    this package, the way alembic loads it.
+    """
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    (tmp_path / "revision_chain.json").write_text(json.dumps({"cccc": "bbbb"}))
+    migration = versions_dir / "cccc_add_things.py"
+    migration.write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "cccc"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+
+    _chain.build_chain.cache_clear()
+    try:
+        namespace = runpy.run_path(str(migration))
+    finally:
+        _chain.build_chain.cache_clear()
+
+    assert namespace["down_revision"] == "bbbb"
 
 
 def test_revision_id_read_from_attribute_not_filename(
