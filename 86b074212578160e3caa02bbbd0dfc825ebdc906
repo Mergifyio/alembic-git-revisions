@@ -1,0 +1,6 @@
+Revision history for #56:
+
+rev 2 (content) 2026-09-24 14:27 UTC — address review: make the imported package directory absolute, like the frames' directories it is compared with
+rev 1 (initial) 2026-09-24 14:27 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":56,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"27facbe0833ba59f97d493923baa7bca6286bb86","timestamp_iso":"2026-09-24T14:27:26Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"27facbe0833ba59f97d493923baa7bca6286bb86","new_sha":"c72d376968784fc8bc98a918a0240d3d90915aec","timestamp_iso":"2026-09-24T14:27:26Z","reason":"address review: make the imported package directory absolute, like the frames' directories it is compared with","replay_sha":null,"compare_url":"https://github.com/Mergifyio/alembic-git-revisions/compare/27facbe0833ba59f97d493923baa7bca6286bb86...c72d376968784fc8bc98a918a0240d3d90915aec"}]} -->
