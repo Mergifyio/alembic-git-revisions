@@ -161,6 +161,18 @@ def _is_get_down_revision_call(node: ast.expr | None) -> bool:
     return isinstance(func, ast.Attribute) and func.attr == "get_down_revision"
 
 
+# This package's directory, as imported and resolved. Its frames' filenames are
+# the path it was imported by, so comparing directories identifies them with no
+# filesystem access; the resolved form also covers a frame reached through the
+# symlink's target. Made absolute like the frames' directories are below.
+_THIS_PACKAGE_DIRS = frozenset(
+    {
+        pathlib.Path(__file__).absolute().parent,
+        pathlib.Path(__file__).resolve().parent,
+    },
+)
+
+
 def _discover_versions_dir() -> pathlib.Path:
     """Auto-discover the versions directory from the calling migration file.
 
@@ -168,28 +180,21 @@ def _discover_versions_dir() -> pathlib.Path:
     That caller is expected to be a migration file living in a ``versions/``
     directory.
     """
-    # Resolved, like the frames it is compared with below, so this package's
-    # own frames are recognized whatever path it was imported by (a symlinked
-    # site-packages, for instance).
-    this_pkg = pathlib.Path(__file__).resolve().parent
-
     # Walk the frame objects themselves rather than `inspect.stack()`, which
     # also reads the source context of every frame on the stack: called once
     # per migration, that made up most of the time it takes to build a long
-    # revision map, and only the filename is needed here.
+    # revision map, and only the filename is needed here. For the same reason
+    # nothing here resolves a path, which costs filesystem calls per frame.
     frame = inspect.currentframe()
     try:
         while frame is not None:
-            filename = frame.f_code.co_filename
-            # Skip frames from this package
-            try:
-                pathlib.Path(filename).resolve().relative_to(this_pkg)
-            except ValueError:
+            caller_dir = pathlib.Path(frame.f_code.co_filename).absolute().parent
+            if caller_dir not in _THIS_PACKAGE_DIRS:
                 # Outside this package — this is the migration file. Its
                 # directory is returned as alembic loaded it, not resolved: the
                 # CLI writes revision_chain.json beside the path it is given,
                 # so a symlinked versions directory has its chain file there.
-                return pathlib.Path(filename).absolute().parent
+                return caller_dir
             frame = frame.f_back
     finally:
         # A frame references its locals, this one included: drop it so the
