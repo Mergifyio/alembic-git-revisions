@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import pathlib
 import runpy
 import subprocess
+import sys
 from unittest import mock
 
 import pytest
@@ -932,6 +934,77 @@ def test_auto_discover_versions_dir_from_a_real_migration_file(
         namespace = runpy.run_path(str(migration))
     finally:
         _chain.build_chain.cache_clear()
+
+    assert namespace["down_revision"] == "bbbb"
+
+
+def test_auto_discover_keeps_a_symlinked_versions_dir(tmp_path: pathlib.Path) -> None:
+    """A ``versions/`` symlink finds the chain file generated beside it.
+
+    The CLI writes ``revision_chain.json`` next to the path it is given, and
+    alembic loads migrations through that same path, so discovery must hand
+    ``build_chain`` the symlink, not the directory it points to.
+    """
+    real_versions = tmp_path / "shared" / "versions"
+    real_versions.mkdir(parents=True)
+    project = tmp_path / "migrations"
+    project.mkdir()
+    (project / "versions").symlink_to(real_versions, target_is_directory=True)
+    (project / "revision_chain.json").write_text(json.dumps({"cccc": "bbbb"}))
+    (real_versions / "cccc_add_things.py").write_text(
+        "from alembic_git_revisions import get_down_revision\n"
+        'revision = "cccc"\n'
+        "down_revision = get_down_revision(revision)\n",
+    )
+
+    _chain.build_chain.cache_clear()
+    try:
+        namespace = runpy.run_path(str(project / "versions" / "cccc_add_things.py"))
+    finally:
+        _chain.build_chain.cache_clear()
+
+    assert namespace["down_revision"] == "bbbb"
+
+
+def test_auto_discover_skips_this_package_imported_through_a_symlink(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The package's own frames are skipped whatever path it was imported by.
+
+    With every site-packages file a symlink (e.g. ``uv sync --link-mode
+    symlink``), the package's frames carry the symlinked path; they must not be
+    mistaken for the migration's.
+    """
+    linked_package = tmp_path / "site" / "alembic_git_revisions"
+    linked_package.parent.mkdir()
+    linked_package.symlink_to(
+        pathlib.Path(_chain.__file__).parent,
+        target_is_directory=True,
+    )
+    spec = importlib.util.spec_from_file_location(
+        "alembic_git_revisions_chain_via_symlink",
+        linked_package / "_chain.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    chain_via_symlink = importlib.util.module_from_spec(spec)
+    # Registered first, as an import would: its dataclasses look it up there.
+    monkeypatch.setitem(sys.modules, spec.name, chain_via_symlink)
+    spec.loader.exec_module(chain_via_symlink)
+
+    versions_dir = tmp_path / "versions"
+    versions_dir.mkdir()
+    (tmp_path / "revision_chain.json").write_text(json.dumps({"cccc": "bbbb"}))
+    migration = versions_dir / "cccc_add_things.py"
+    migration.write_text(
+        'revision = "cccc"\ndown_revision = get_down_revision(revision)\n',
+    )
+
+    namespace = runpy.run_path(
+        str(migration),
+        init_globals={"get_down_revision": chain_via_symlink.get_down_revision},
+    )
 
     assert namespace["down_revision"] == "bbbb"
 
