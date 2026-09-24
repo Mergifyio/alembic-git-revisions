@@ -168,7 +168,10 @@ def _discover_versions_dir() -> pathlib.Path:
     That caller is expected to be a migration file living in a ``versions/``
     directory.
     """
-    this_pkg = pathlib.Path(__file__).parent
+    # Resolved, like the frames it is compared with below, so this package's
+    # own frames are recognized whatever path it was imported by (a symlinked
+    # site-packages, for instance).
+    this_pkg = pathlib.Path(__file__).resolve().parent
 
     # Walk the frame objects themselves rather than `inspect.stack()`, which
     # also reads the source context of every frame on the stack: called once
@@ -177,13 +180,16 @@ def _discover_versions_dir() -> pathlib.Path:
     frame = inspect.currentframe()
     try:
         while frame is not None:
-            caller_path = pathlib.Path(frame.f_code.co_filename).resolve()
+            filename = frame.f_code.co_filename
             # Skip frames from this package
             try:
-                caller_path.relative_to(this_pkg)
+                pathlib.Path(filename).resolve().relative_to(this_pkg)
             except ValueError:
-                # Outside this package — this is the migration file
-                return caller_path.parent
+                # Outside this package — this is the migration file. Its
+                # directory is returned as alembic loaded it, not resolved: the
+                # CLI writes revision_chain.json beside the path it is given,
+                # so a symlinked versions directory has its chain file there.
+                return pathlib.Path(filename).absolute().parent
             frame = frame.f_back
     finally:
         # A frame references its locals, this one included: drop it so the
