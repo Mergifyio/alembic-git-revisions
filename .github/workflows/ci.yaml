@@ -5,14 +5,14 @@ on:
 
 jobs:
   linters:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - run: uv run --extra dev poe linters
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13", "3.14"]
@@ -24,7 +24,7 @@ jobs:
   all-greens:
     if: always()
     needs: [linters, test]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
         run: exit 1
